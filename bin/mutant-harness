@@ -16,6 +16,7 @@ COUNT=12
 FOCUS=""
 LINE_RANGE=""
 OPS=""
+STRUCTURAL=0
 OUT_ROOT="$PWD/results"
 MODEL="opus"
 REVIEW=0
@@ -63,8 +64,13 @@ Options:
   --ops <list>         Comma-separated operator classes to prefer, from:
                        deletion, relocation, reorder, boundary, condition,
                        constant, scope, state, error-handling, numeric,
-                       early-exit, concurrency (core), constant-time
-                       (secp256k1), serialization
+                       early-exit, injection, concurrency (core),
+                       constant-time (secp256k1), serialization
+  --structural         Skip what a line-by-line tool (bcore-mutation) already
+                       produces: one-token swaps and single-line deletions.
+                       The agent is told to avoid them, every patch is
+                       classified from its diff (`line_level`), and line-level
+                       mutants are not verified
   --out <dir>          Output root (default: ./results); results land in
                        <dir>/<file-slug>-<timestamp>/
   --model <name>       Model for the mutator (default: opus)
@@ -115,6 +121,7 @@ while [[ $# -gt 0 ]]; do
         --focus)          FOCUS="${2:?}"; shift 2 ;;
         --lines)          LINE_RANGE="${2:?}"; shift 2 ;;
         --ops)            OPS="${2:?}"; shift 2 ;;
+        --structural)     STRUCTURAL=1; shift ;;
         --out)            OUT_ROOT="${2:?}"; shift 2 ;;
         --model)          MODEL="${2:?}"; shift 2 ;;
         --review)         REVIEW=1; shift ;;
@@ -212,7 +219,8 @@ fi
 
 # Hand a finished run's patches to the verifier. Only the mutants that apply and
 # compile: the others would each burn a build to prove what the manifest already
-# says. Verdicts from --review are *not* filtered on - an `equivalent` call is
+# says. A --structural run also leaves out its line-level mutants, which a
+# line-by-line tool tests far more cheaply. Verdicts from --review are *not* filtered on - an `equivalent` call is
 # still a model's opinion, and testing it is how you find out the model was
 # wrong. Either mode's exit code is ours; --export runs only when it succeeded.
 run_verification() {  # run_verification <out-dir> <container-name>
@@ -225,7 +233,10 @@ run_verification() {  # run_verification <out-dir> <container-name>
     out_dir="$(cd "$out_dir" && pwd)"
 
     local runnable
-    runnable="$(jq -r '[.mutants[]? | select(.apply_ok and (.compiles_ok != false)) | .id]
+    runnable="$(jq -r '(.harness.structural // false) as $structural
+                       | [.mutants[]? | select(.apply_ok and (.compiles_ok != false)
+                                               and (($structural | not) or .line_level != true))
+                          | .id]
                        | join(",")' "$manifest")"
     if [[ -z "$runnable" ]]; then
         warn "no mutant both applies and compiles; nothing to verify"
@@ -298,7 +309,7 @@ build_image() {
 }
 
 # What this harness needs the image to contain. Bumped in the Dockerfile too.
-IMAGE_VERSION=5
+IMAGE_VERSION=6
 
 image_label() {
     docker image inspect "$IMAGE" --format "{{index .Config.Labels \"$1\"}}" 2>/dev/null
@@ -393,6 +404,7 @@ DOCKER_ARGS=(
     -e "FOCUS=$FOCUS"
     -e "LINE_RANGE=$LINE_RANGE"
     -e "OPS=$OPS"
+    -e "STRUCTURAL=$STRUCTURAL"
     -e "PROMPT_TEMPLATE=/work/prompt.md"
     -e "REVIEW_PROMPT_TEMPLATE=/work/review.md"
     -e "REPORT_FILE=/out/report.json"
@@ -466,7 +478,9 @@ if [[ -s "$MANIFEST" ]] && command -v jq >/dev/null && jq empty "$MANIFEST" 2>/d
       "target: \(.target.file // "?")  (\(.target.lines // "whole file"))",
       "\(.harness.target // "core"): \(.repo.commit[0:12] // "?")",
       "\((.mutants // []) | length) mutants, " +
-        "\([.mutants[]? | select(.apply_ok == false)] | length) that do not apply",
+        "\([.mutants[]? | select(.apply_ok == false)] | length) that do not apply, " +
+        "\([.mutants[]? | select(.line_level)] | length) line-level" +
+        "\(if .harness.structural then " (not verified, --structural)" else "" end)",
       (if .review then
          "review: \(.review.sneaky // 0) sneaky, \(.review.likely_killed // 0) likely-killed, " +
          "\(.review.equivalent // 0) equivalent, \(.review.invalid // 0) invalid"
@@ -479,7 +493,8 @@ if [[ -s "$MANIFEST" ]] && command -v jq >/dev/null && jq empty "$MANIFEST" 2>/d
               | ["critical","high","medium","low"] | index($s) // 9)]
         )[] |
         "  \(.id) [\(.severity_if_undetected // "?")]" +
-        "\(if .verdict then " [\(.verdict)]" else "" end) " +
+        "\(if .verdict then " [\(.verdict)]" else "" end)" +
+        "\(if .line_level then " [line-level]" else "" end) " +
         "\(.operator // "?") @\(.location.lines // "?"): \(.title)"),
       "",
       "summary: \(.summary // "")"

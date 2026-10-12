@@ -30,6 +30,8 @@ $FOCUS_TEXT
 
 $OPS_TEXT
 
+$STRUCTURAL_TEXT
+
 Do not modify any file other than `$TARGET_FILE`. A patch that touches a second
 file is discarded by the harness. Do not modify tests to make a mutant survive:
 the mutant must survive the tests as they are.
@@ -122,6 +124,12 @@ review more easily.
 - `scope` - move a block into or out of an `if`/`else`/loop, change which branch
   guards it, un-nest one level, hoist code out of a conditional so it runs
   unconditionally, or sink unconditional code into a branch.
+- `injection` - add a call or statement the original does not make, in the
+  file's own vocabulary: call a function twice where the original calls it
+  once, update or reset state on a path that must leave it alone (clear a
+  cache, mark a peer, erase from a map inside the loop iterating it), add a
+  defensive-looking early `return` or `continue` on a condition that does
+  occur, take the value from a cheaper getter that is stale at that point.
 - `boundary` - `<` vs `<=`, `>` vs `>=`, off-by-one against a named limit, an
   inclusive range made exclusive, a loop bound that stops one short or one over.
 - `condition` - negate a subexpression, swap `&&` for `||`, drop one clause of a
@@ -174,7 +182,7 @@ per mutant, named `<id>.patch`.
 
 Do not write `target`, `repo`, `bips_repo`, `harness`, `patch`, `apply_ok`,
 `files_touched`, `lines_added`, `lines_removed`, `patch_sha256`, `compiles_ok`,
-`compile_error`, or
+`compile_error`, `line_level`, or
 `duplicate_of`: the harness stamps those itself after you exit by re-checking
 every patch against git, and anything you put there is overwritten. Write the
 fields below and nothing else.
@@ -194,7 +202,7 @@ fields below and nothing else.
     {
       "id": "mut-001",
       "title": "one line, specific: what the mutant does",
-      "operator": "deletion | relocation | reorder | scope | boundary | condition | constant | state | error-handling | numeric | early-exit | concurrency | serialization",
+      "operator": "deletion | relocation | reorder | scope | injection | boundary | condition | constant | state | error-handling | numeric | early-exit | concurrency | serialization",
       "location": {
         "function": "enclosing function or method",
         "lines": "1234-1240 (in the original file)"
