@@ -56,6 +56,27 @@ else
     log "reusing the configured build at $BUILD_PATH"
 fi
 
+# Every container starts from the image's tree, so a file the volume last built
+# from other contents (another commit, or the previous run's last mutant, which
+# mutant-verify reverts but does not rebuild) can carry an mtime older than its
+# object, and make would link the stale object. The volume records each file's
+# blob as built; touch whatever differs so make rebuilds it.
+STAMP="$BUILD_PATH/.harness-tree"
+current="$(git -C "$BITCOIN_SRC" ls-files -s | awk -F'\t' '{ split($1, a, " "); print a[2] "\t" $2 }')"
+stale=""
+if [[ -f "$STAMP" ]]; then
+    stale="$(grep -vxFf "$STAMP" <<< "$current" | cut -f2)"
+elif [[ -d "$BUILD_PATH/src" ]]; then
+    log "build volume has no record of what it was built from; rebuilding everything"
+    stale="$(cut -f2 <<< "$current")"
+fi
+[[ -n "$stale" ]] && (cd "$BITCOIN_SRC" && xargs -d '\n' touch -- <<< "$stale")
+# Files touched now, or about to be patched, may not end this run built from the
+# tree's contents, so leave them out of the record: the next run rebuilds them.
+patched="$(cat "$PATCH_DIR"/*.patch 2>/dev/null | sed -n 's|^+++ b/||p')"
+awk -F'\t' 'NR == FNR { skip[$0] = 1; next } !($2 in skip)' \
+    <(printf '%s\n%s\n' "$stale" "$patched") <(printf '%s\n' "$current") > "$STAMP"
+
 ARGS=(--repo "$BITCOIN_SRC" --patches "$PATCH_DIR" --build-dir "$BUILD_DIR")
 [[ -n "$VERIFY_ONLY" ]] && ARGS+=(--only "$VERIFY_ONLY")
 

@@ -267,9 +267,17 @@ run_verification() {  # run_verification <out-dir> <container-name>
     # expensive half of this and the volume is what makes it a one-off.
     local commit; commit="$(jq -r '.repo.commit // ""' "$manifest")"
     log "verifying ${runnable//,/ } in a container (build volume: $VERIFY_VOLUME)"
+    # On the default bridge the container's only IPv6 address is ::1, and
+    # libevent (the RPC server of older Core commits) then will not bind ::1:
+    # rpc_bind.py --ipv6 and interface_bitcoin_cli.py fail the baseline.
+    local network=mutant-harness-verify
+    docker network inspect "$network" >/dev/null 2>&1 \
+        || docker network create --ipv6 "$network" >/dev/null \
+        || die "cannot create the IPv6 docker network $network"
     local args=(
         run --rm
         --name "$name"
+        --network "$network"
         --user "$(id -u):$(id -g)"
         -v "$out_dir:/out"
         -v "$VERIFY_VOLUME:/src/bitcoin/build"
@@ -317,7 +325,7 @@ build_image() {
 }
 
 # What this harness needs the image to contain. Bumped in the Dockerfile too.
-IMAGE_VERSION=8
+IMAGE_VERSION=9
 
 image_label() {
     docker image inspect "$IMAGE" --format "{{index .Config.Labels \"$1\"}}" 2>/dev/null
