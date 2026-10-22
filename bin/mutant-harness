@@ -445,10 +445,46 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
             *)                            gen_args+=("$1"); shift ;;
         esac
     done
+    # A file whose blobs, before and after, are the ones an earlier run of this PR
+    # with the same options mutated gets that run's mutants back instead of a new
+    # agent: a force-push that leaves the file alone changes nothing they were cut
+    # from. They are still verified again, at the new head, whose tests may differ.
+    declare -A blobs_of=()
+    while IFS=$'\t' read -r f idx; do blobs_of[$f]="$idx"; done < <(awk '
+        /^diff --git / { idx = "" }
+        /^index /      { idx = $2 }
+        /^\+\+\+ b\//  { print substr($0, 7) "\t" idx }' <<< "$diff")
+    head=""
+    command -v jq >/dev/null && head="$(curl -fsSL --retry 3 \
+        "https://api.github.com/repos/${REPO_PATH}/pulls/$PR" | jq -r '.head.sha // empty')"
+    cached_run() {  # cached_run <file> <key>: the newest earlier run dir made with that key
+        local d found=""
+        for d in "$OUT_ROOT/$(slug_of "$1")"-*/; do
+            d="${d%/}"
+            [[ ! -L "$d" && -f "$d/cache-key" && "$(< "$d/cache-key")" == "$2" && -s "$d/out/mutants.json" ]] \
+                && found="$d"
+        done
+        printf '%s' "$found"
+    }
+
     # One stamp for every file, so each run dir is known here.
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-    pids=()
+    pids=() keys=()
     for f in "${files[@]}"; do
+        key="${blobs_of[$f]:-} ${gen_args[*]}"
+        keys+=("$key")
+        prev="$(cached_run "$f" "$key")"
+        if [[ -n "$prev" && -n "$head" ]]; then
+            log "=== $f: unchanged since $(basename "$prev"); reusing its mutants ==="
+            dir="$OUT_ROOT/$(slug_of "$f")-$stamp"
+            mkdir -p "$dir/work" && cp -r "$prev/out" "$dir/" && rm -rf "$dir/out/verify"
+            for j in mutants.json report.json; do
+                jq --arg c "$head" '.repo.commit = $c' "$dir/out/$j" > "$dir/out/$j.tmp" \
+                    && mv "$dir/out/$j.tmp" "$dir/out/$j"
+            done
+            pids+=(cached)
+            continue
+        fi
         log "=== $f: generating ==="
         ( MUTANT_HARNESS_STAMP="$stamp" "$0" "${gen_args[@]}" --file "$f" 2>&1 \
               | sed -u "s|^|[${f##*/}] |" ) &
@@ -456,7 +492,12 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
     done
     failed=() generated=()
     for i in "${!files[@]}"; do
-        if wait "${pids[$i]}"; then generated+=("${files[$i]}"); else failed+=("${files[$i]}"); fi
+        if [[ "${pids[$i]}" == cached ]] || wait "${pids[$i]}"; then
+            generated+=("${files[$i]}")
+            printf '%s\n' "${keys[$i]}" > "$OUT_ROOT/$(slug_of "${files[$i]}")-$stamp/cache-key"
+        else
+            failed+=("${files[$i]}")
+        fi
     done
     if [[ "$VERIFY" == 1 ]]; then
         baseline=()
