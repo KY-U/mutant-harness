@@ -369,6 +369,8 @@ if [[ -n "$VERIFY_ONLY_DIR" ]]; then
     run_verification "$VERIFY_OUT" "mutant-harness-verify-$(basename "$RUN_DIR")"
 fi
 
+slug_of() { printf '%s' "$1" | tr '/.' '--' | sed 's/^-*//'; }
+
 # -------------------------------------------------------------- pr files ----
 # --pr without --file mutates every source file the PR adds lines to, one run
 # (and run dir) each, by re-running ourselves with --file. Tests and benchmarks
@@ -415,14 +417,45 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
     log "pull request #$PR: ${#files[@]} file(s): ${files[*]}"
     trap report_time EXIT
 
-    # The image is current by now; do not rebuild it once per file.
-    args=()
-    for a in "${ORIG_ARGS[@]}"; do [[ "$a" == --rebuild ]] || args+=("$a"); done
-    failed=()
-    for f in "${files[@]}"; do
-        log "=== $f ==="
-        "$0" "${args[@]}" --file "$f" || failed+=("$f")
+    # The image is current by now; do not rebuild it once per file. Every file
+    # is generated at once, without the verification flags; the runs are then
+    # verified one after another, since they share one build volume and the
+    # CPU. They share one commit too, so only the first runs the baseline.
+    gen_args=() ver_args=()
+    set -- "${ORIG_ARGS[@]}"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --rebuild)                    shift ;;
+            --verify|--export)            ver_args+=("$1"); shift ;;
+            --verify-repo|--verify-arg)   ver_args+=("$1" "$2"); shift 2 ;;
+            --target|--repo|--docker-arg) gen_args+=("$1" "$2"); ver_args+=("$1" "$2"); shift 2 ;;
+            *)                            gen_args+=("$1"); shift ;;
+        esac
     done
+    # One stamp for every file, so each run dir is known here.
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    pids=()
+    for f in "${files[@]}"; do
+        log "=== $f: generating ==="
+        ( MUTANT_HARNESS_STAMP="$stamp" "$0" "${gen_args[@]}" --file "$f" 2>&1 \
+              | sed -u "s|^|[${f##*/}] |" ) &
+        pids+=("$!")
+    done
+    failed=() generated=()
+    for i in "${!files[@]}"; do
+        if wait "${pids[$i]}"; then generated+=("${files[$i]}"); else failed+=("${files[$i]}"); fi
+    done
+    if [[ "$VERIFY" == 1 ]]; then
+        baseline=()
+        for f in ${generated[@]+"${generated[@]}"}; do
+            dir="$OUT_ROOT/$(slug_of "$f")-$stamp"
+            log "=== $f: verifying ==="
+            "$0" "${ver_args[@]}" ${baseline[@]+"${baseline[@]}"} --verify-only "$dir" \
+                || { failed+=("$f"); continue; }
+            # No verify dir means nothing was runnable, and no baseline ran.
+            [[ -d "$dir/out/verify" ]] && baseline=(--verify-arg --no-baseline)
+        done
+    fi
     (( ${#failed[@]} == 0 )) || die "failed: ${failed[*]}"
     log "all ${#files[@]} file(s) of pull request #$PR done"
     exit 0
@@ -441,10 +474,10 @@ TARGET_FILE="${TARGET_FILE#./}"
 [[ -z "$PR" || "$UPDATE_CORE" == 0 ]] || die "--pr and --update-core both pick the commit; pick one"
 [[ -z "$PR" || -z "$LINE_RANGE" ]] || die "--pr picks the lines itself (the ones it adds); drop --lines"
 
-SLUG="$(printf '%s' "$TARGET_FILE" | tr '/.' '--' | sed 's/^-*//')"
+SLUG="$(slug_of "$TARGET_FILE")"
 
 # ------------------------------------------------------------- run dir ----
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+STAMP="${MUTANT_HARNESS_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
 RUN_DIR="$OUT_ROOT/$SLUG-$STAMP"
 WORK_DIR="$RUN_DIR/work"
 OUT_DIR="$RUN_DIR/out"
