@@ -62,6 +62,12 @@ if [[ -n "$PR" ]]; then
     git -C "$BITCOIN_SRC" fetch --depth 1 origin "pull/$PR/head" \
         && git -C "$BITCOIN_SRC" reset --hard FETCH_HEAD \
         || die "cannot fetch pull request #$PR"
+    REPO_PATH="${REPO_URL#https://github.com/}"; REPO_PATH="${REPO_PATH%.git}"
+    # A depth-1 clone has no merge base to diff against; GitHub's diff is taken
+    # against it, numbered as the head we just checked out.
+    curl -fsSL --retry 3 -H "Accept: application/vnd.github.v3.diff" \
+        "https://api.github.com/repos/${REPO_PATH}/pulls/$PR" -o /work/pr.diff \
+        || die "cannot download the diff of pull request #$PR"
 fi
 
 if [[ "$UPDATE_BIPS" == "1" ]]; then
@@ -85,6 +91,49 @@ TARGET_PATH="$BITCOIN_SRC/$TARGET_FILE"
 TARGET_LINES="$(wc -l < "$TARGET_PATH")"
 log "target: $TARGET_FILE ($TARGET_LINES lines)"
 
+# A PR run mutates only what the PR adds to the file: the lines it added, as
+# ranges like 12-20,45. The pre-existing code is not the PR's to test.
+PR_LINES=""
+if [[ -n "$PR" ]]; then
+    PR_LINES="$(python3 - /work/pr.diff "$TARGET_FILE" <<'PY'
+import re, sys
+path, target = sys.argv[1], sys.argv[2]
+added, files, cur, header, new = [], [], None, False, 0
+for l in open(path, encoding="utf-8", errors="replace"):
+    if l.startswith("diff --git "):
+        cur, header = None, True
+        continue
+    if header:
+        if l.startswith("+++ b/"):
+            cur = l[6:].rstrip("\n")
+            files.append(cur)
+        m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", l)
+        if m:
+            header, new = False, int(m.group(1))
+        continue
+    m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", l)
+    if m:
+        new = int(m.group(1))
+    elif l.startswith("+"):
+        if cur == target:
+            added.append(new)
+        new += 1
+    elif l.startswith(" "):
+        new += 1
+if not added:
+    sys.exit("it adds no lines to " + target + "; it changes: " + (" ".join(files) or "nothing"))
+ranges, start = [], added[0]
+for prev, n in zip(added, added[1:] + [None]):
+    if n != prev + 1:
+        ranges.append(str(start) if start == prev else f"{start}-{prev}")
+        start = n
+print(",".join(ranges))
+PY
+)" || die "cannot mutate $TARGET_FILE for pull request #$PR"
+    LINE_RANGE="$PR_LINES"
+    log "pull request #$PR adds lines $PR_LINES"
+fi
+
 # A dirty target file would make every `git diff` the agent takes include
 # somebody else's edits, so start from a known-clean copy of it.
 if ! git -C "$BITCOIN_SRC" diff --quiet -- "$TARGET_FILE"; then
@@ -94,7 +143,9 @@ fi
 
 # Human-readable framing for the prompt, so an unset flag reads as a sentence
 # rather than as an empty placeholder.
-if [[ -n "$LINE_RANGE" ]]; then
+if [[ -n "$PR" ]]; then
+    RANGE_TEXT="This run tests pull request #$PR. Restrict every mutation to the lines it adds to the file: $PR_LINES. Code the PR did not touch is out of scope however interesting it is; a mutant that changes any other line is discarded by the harness. The PR's full diff is at /work/pr.diff."
+elif [[ -n "$LINE_RANGE" ]]; then
     RANGE_TEXT="Restrict every mutation to lines $LINE_RANGE of the file. Mutants outside that range will be discarded."
 else
     RANGE_TEXT="The whole file is in scope."
@@ -205,7 +256,7 @@ fi
 # ------------------------------------------------------------- helpers ----
 export TARGET_FILE TARGET_PATH TARGET_LINES BITCOIN_SRC BIPS_SRC OUT_DIR \
        REPORT_FILE PATCH_DIR MUTANT_COUNT RANGE_TEXT FOCUS_TEXT OPS_TEXT \
-       STRUCTURAL_TEXT COMPILE_TEXT
+       STRUCTURAL_TEXT COMPILE_TEXT PR_LINES
 
 # Materialise a prompt with the run's paths substituted in.
 render_prompt() {
@@ -290,6 +341,12 @@ src         = os.environ["BITCOIN_SRC"]
 patch_dir   = os.environ["PATCH_DIR"]
 target      = os.environ["TARGET_FILE"]
 
+# The lines a --pr run may touch; empty means the whole file.
+allowed = set()
+for r in filter(None, os.environ.get("PR_LINES", "").split(",")):
+    a, _, b = r.partition("-")
+    allowed.update(range(int(a), int(b or a) + 1))
+
 with open(report_path, encoding="utf-8") as fh:
     report = json.load(fh)
 
@@ -319,6 +376,27 @@ def line_level(removed, added):
              if op[0] != "equal"]
     return (len(edits) == 1
             and edits[0][2] - edits[0][1] <= 1 and edits[0][4] - edits[0][3] <= 1)
+
+def outside(patch_lines):
+    """True when the patch changes a line outside `allowed`: a removed line not
+    in it, or an added line with neither neighbour in it."""
+    old, in_hunk = 0, False
+    for l in patch_lines:
+        m = re.match(r"@@ -(\d+)", l)
+        if m:
+            old, in_hunk = int(m.group(1)), True
+        elif not in_hunk:
+            continue
+        elif l.startswith("-"):
+            if old not in allowed:
+                return True
+            old += 1
+        elif l.startswith("+"):
+            if old - 1 not in allowed and old not in allowed:
+                return True
+        elif l.startswith(" "):
+            old += 1
+    return False
 
 for m in mutants:
     mid = str(m.get("id") or "").strip()
@@ -361,11 +439,16 @@ for m in mutants:
         m["apply_ok"] = False
         m["apply_error"] = "patch changes nothing"
 
+    with open(patch, encoding="utf-8", errors="replace") as fh:
+        patch_lines = fh.readlines()
+    if m.get("apply_ok") and allowed and outside(patch_lines):
+        m["apply_ok"] = False
+        m["apply_error"] = "changes lines the pull request did not add"
+
     # Two mutants with byte-identical bodies are one mutant. Hash only the +/-
     # lines so differing hunk headers do not hide a duplicate.
-    with open(patch, encoding="utf-8", errors="replace") as fh:
-        changed = [l for l in fh
-                   if (l.startswith(("+", "-")) and not l.startswith(("+++", "---")))]
+    changed = [l for l in patch_lines
+               if (l.startswith(("+", "-")) and not l.startswith(("+++", "---")))]
     body = "".join(changed)
     digest = hashlib.sha256(body.encode()).hexdigest()
     m["line_level"] = line_level([l[1:] for l in changed if l[0] == "-"],

@@ -42,6 +42,9 @@ EXTRA_DOCKER_ARGS=()
 log()  { printf '\033[36m[mutant-harness]\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m[mutant-harness]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m[mutant-harness]\033[0m %s\n' "$*" >&2; exit 1; }
+# Wall time since the script started, image build included. Trapped on EXIT
+# once a run starts, so every way out of it reports.
+report_time() { log "finished in $((SECONDS / 60))m$((SECONDS % 60))s"; }
 
 usage() {
     cat >&2 <<'EOF'
@@ -56,7 +59,9 @@ Options:
                        (Bitcoin Core, the default) or secp256k1. Each target
                        has its own image, prompts and verify build volume.
   --file <path>        File to mutate, relative to the target tree
-                       (e.g. src/script/interpreter.cpp). Required.
+                       (e.g. src/script/interpreter.cpp). Required, unless
+                       --pr is given: then every source file the PR adds
+                       lines to is mutated, one run each
   --count <n>          How many mutants to aim for (default: 12)
   --focus <text>       Steer the agent at one area ("segwit v1 witness parsing",
                        "the fee estimator", a function name, ...)
@@ -96,7 +101,8 @@ Options:
                        out/import.json with bin/mutant-export
   --update-core        git fetch master inside the container first
   --pr <n>             Mutate the head of GitHub pull request <n> instead of
-                       master (fetched inside the container)
+                       master (fetched inside the container), and only the
+                       lines the PR adds
   --update-bips        git fetch the bips repo too
   --rebuild            Rebuild the docker image first
   --build-only         Build the image and exit
@@ -113,6 +119,8 @@ EOF
 }
 
 BUILD_ONLY=0
+# Kept for re-running ourselves once per file of a --pr run.
+ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --target)         TARGET="${2:?}"; shift 2 ;;
@@ -309,7 +317,7 @@ build_image() {
 }
 
 # What this harness needs the image to contain. Bumped in the Dockerfile too.
-IMAGE_VERSION=6
+IMAGE_VERSION=8
 
 image_label() {
     docker image inspect "$IMAGE" --format "{{index .Config.Labels \"$1\"}}" 2>/dev/null
@@ -349,7 +357,50 @@ if [[ -n "$VERIFY_ONLY_DIR" ]]; then
         die "no mutants.json under $RUN_DIR (pass a run directory from results/)"
     fi
     log "verify only: $VERIFY_OUT"
+    trap report_time EXIT
     run_verification "$VERIFY_OUT" "mutant-harness-verify-$(basename "$RUN_DIR")"
+fi
+
+# -------------------------------------------------------------- pr files ----
+# --pr without --file mutates every source file the PR adds lines to, one run
+# (and run dir) each, by re-running ourselves with --file. Tests and benchmarks
+# are skipped: mutating the tests says nothing about them.
+if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
+    [[ "$PR" =~ ^[0-9]+$ ]] || die "--pr takes a pull request number, got: $PR"
+    [[ "$SHELL_MODE" == 0 ]] || die "--shell needs --file"
+    command -v curl >/dev/null || die "--pr without --file needs curl"
+    REPO_PATH="${REPO_URL#https://github.com/}"; REPO_PATH="${REPO_PATH%.git}"
+    diff="$(curl -fsSL --retry 3 -H "Accept: application/vnd.github.v3.diff" \
+        "https://api.github.com/repos/${REPO_PATH}/pulls/$PR")" \
+        || die "cannot download the diff of pull request #$PR"
+    files=()
+    while IFS= read -r f; do
+        if [[ "$f" =~ \.(c|cc|cpp|h|hpp)$ && ! "$f" =~ (^|/)(test|bench) ]]; then
+            files+=("$f")
+        else
+            log "skipping $f (not a source file, or a test or benchmark)"
+        fi
+    # Only files with an added line: a file the PR only deletes from has nothing
+    # left to mutate.
+    done < <(awk '/^diff --git /   { hdr = 1; next }
+                  hdr && /^\+\+\+ b\// { f = substr($0, 7) }
+                  hdr && /^@@/   { hdr = 0; next }
+                  !hdr && /^\+/ && f != "" && !(f in seen) { seen[f] = 1; print f }' <<< "$diff")
+    (( ${#files[@]} )) || die "pull request #$PR adds lines to no source file"
+    log "pull request #$PR: ${#files[@]} file(s): ${files[*]}"
+    trap report_time EXIT
+
+    # The image is current by now; do not rebuild it once per file.
+    args=()
+    for a in "${ORIG_ARGS[@]}"; do [[ "$a" == --rebuild ]] || args+=("$a"); done
+    failed=()
+    for f in "${files[@]}"; do
+        log "=== $f ==="
+        "$0" "${args[@]}" --file "$f" || failed+=("$f")
+    done
+    (( ${#failed[@]} == 0 )) || die "failed: ${failed[*]}"
+    log "all ${#files[@]} file(s) of pull request #$PR done"
+    exit 0
 fi
 
 # ----------------------------------------------------------------- args ----
@@ -363,6 +414,7 @@ TARGET_FILE="${TARGET_FILE#./}"
 [[ -z "$LINE_RANGE" || "$LINE_RANGE" =~ ^[0-9]+-[0-9]+$ ]] || die "--lines takes a-b, got: $LINE_RANGE"
 [[ -z "$PR" || "$PR" =~ ^[0-9]+$ ]] || die "--pr takes a pull request number, got: $PR"
 [[ -z "$PR" || "$UPDATE_CORE" == 0 ]] || die "--pr and --update-core both pick the commit; pick one"
+[[ -z "$PR" || -z "$LINE_RANGE" ]] || die "--pr picks the lines itself (the ones it adds); drop --lines"
 
 SLUG="$(printf '%s' "$TARGET_FILE" | tr '/.' '--' | sed 's/^-*//')"
 
@@ -418,6 +470,7 @@ DOCKER_ARGS=(
     -e "FALLBACK_MODEL=$FALLBACK_MODEL"
     -e "UPDATE_CORE=$UPDATE_CORE"
     -e "PR=$PR"
+    -e "REPO_URL=$REPO_URL"
     -e "UPDATE_BIPS=$UPDATE_BIPS"
     -e "HOME=/home/agent"
 )
@@ -448,6 +501,7 @@ if [[ "$DETACH" == 1 ]]; then
 fi
 
 log "run dir: $RUN_DIR"
+trap report_time EXIT
 log "mutating $TARGET_FILE (target $COUNT mutants, model=$MODEL) ..."
 
 set +e
