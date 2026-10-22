@@ -26,6 +26,7 @@ MUTANT_COUNT="${MUTANT_COUNT:-12}"
 FOCUS="${FOCUS:-}"
 LINE_RANGE="${LINE_RANGE:-}"
 OPS="${OPS:-}"
+STRUCTURAL="${STRUCTURAL:-0}"
 UPDATE_CORE="${UPDATE_CORE:-0}"
 PR="${PR:-}"
 UPDATE_BIPS="${UPDATE_BIPS:-0}"
@@ -108,6 +109,32 @@ if [[ -n "$OPS" ]]; then
 else
     OPS_TEXT="All operator classes below are available; pick per site whichever produces the most plausible bug."
 fi
+if [[ "$STRUCTURAL" == "1" ]]; then
+    STRUCTURAL_TEXT="$(cat <<'EOF'
+**Line-level mutants are out of scope for this run, and this overrides any
+operator preference above.** A line-by-line tool (bcore-mutation and the like)
+already produces every one of these, so writing them here repeats its output at
+many times the cost. Do not write a mutant whose whole diff is:
+
+- one token swapped on one line: a relational, arithmetic, logical or bitwise
+  operator, `true`/`false`, a literal, `&&`/`||`, `break`/`continue`, one
+  identifier for another;
+- one token added or removed on one line, such as a `!`;
+- one line deleted outright.
+
+The harness classifies every patch from its diff after you exit, records the
+result as `line_level`, and does not build or test the line-level ones. Spend
+the budget on changes such a tool cannot make: `relocation`, `reorder`,
+`scope`, `injection`, `state`, the target's own classes (`concurrency`,
+`constant-time`), a deletion of a whole block or of coordinated lines, error
+handling that restructures the failure path. A boundary, condition or constant
+mutant is in scope only when it takes a coordinated edit across lines that no
+single-token swap reproduces.
+EOF
+)"
+else
+    STRUCTURAL_TEXT=""
+fi
 
 # -------------------------------------------------------- compile check ----
 # A Core build would eat the whole budget, but one translation unit is seconds,
@@ -178,7 +205,7 @@ fi
 # ------------------------------------------------------------- helpers ----
 export TARGET_FILE TARGET_PATH TARGET_LINES BITCOIN_SRC BIPS_SRC OUT_DIR \
        REPORT_FILE PATCH_DIR MUTANT_COUNT RANGE_TEXT FOCUS_TEXT OPS_TEXT \
-       COMPILE_TEXT
+       STRUCTURAL_TEXT COMPILE_TEXT
 
 # Materialise a prompt with the run's paths substituted in.
 render_prompt() {
@@ -188,12 +215,15 @@ src, dst = sys.argv[1], sys.argv[2]
 text = open(src, encoding="utf-8").read()
 keys = ("TARGET_FILE", "TARGET_PATH", "TARGET_LINES", "BITCOIN_SRC", "BIPS_SRC",
         "OUT_DIR", "REPORT_FILE", "PATCH_DIR", "MUTANT_COUNT", "RANGE_TEXT",
-        "FOCUS_TEXT", "OPS_TEXT", "COMPILE_TEXT", "IN_MUTANTS", "OUT_REVIEWED")
+        "FOCUS_TEXT", "OPS_TEXT", "STRUCTURAL_TEXT", "COMPILE_TEXT", "IN_MUTANTS",
+        "OUT_REVIEWED")
 # Longest first so a shorter name never eats the prefix of a longer one.
 for k in sorted(keys, key=len, reverse=True):
     v = os.environ.get(k)
     if v:
         text = text.replace("$" + k, v)
+    elif k == "STRUCTURAL_TEXT":
+        text = text.replace("\n$" + k + "\n", "")
 open(dst, "w", encoding="utf-8").write(text)
 PY
     [[ -s "$2" ]] || die "failed to render prompt $1"
@@ -253,7 +283,7 @@ if m:
 # another mutant? Whatever the agent wrote in those fields is overwritten.
 validate_patches() {
     python3 - "$REPORT_FILE" <<'PY'
-import hashlib, json, os, subprocess, sys
+import difflib, hashlib, json, os, re, subprocess, sys
 
 report_path = sys.argv[1]
 src         = os.environ["BITCOIN_SRC"]
@@ -270,6 +300,25 @@ claimed = set()
 def git(*args):
     return subprocess.run(["git", "-C", src, *args],
                           capture_output=True, text=True)
+
+# Multi-character operators first, so `<=` is one token rather than `<` and `=`.
+TOKEN = re.compile(r"\w+|<<=|>>=|->|<<|>>|&&|\|\||\+\+|--|[-+*/%&|^<>=!]=|\S")
+
+def line_level(removed, added):
+    """True when the change is one a line-by-line mutation tool also makes:
+    a single line deleted, or a single line whose tokens differ by one token
+    swapped, added or dropped. Whitespace-only lines do not count."""
+    removed = [l for l in removed if l.strip()]
+    added   = [l for l in added if l.strip()]
+    if len(removed) == 1 and not added:
+        return True
+    if len(removed) != 1 or len(added) != 1:
+        return False
+    a, b = TOKEN.findall(removed[0]), TOKEN.findall(added[0])
+    edits = [op for op in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+             if op[0] != "equal"]
+    return (len(edits) == 1
+            and edits[0][2] - edits[0][1] <= 1 and edits[0][4] - edits[0][3] <= 1)
 
 for m in mutants:
     mid = str(m.get("id") or "").strip()
@@ -315,9 +364,12 @@ for m in mutants:
     # Two mutants with byte-identical bodies are one mutant. Hash only the +/-
     # lines so differing hunk headers do not hide a duplicate.
     with open(patch, encoding="utf-8", errors="replace") as fh:
-        body = "".join(l for l in fh
-                       if (l.startswith(("+", "-")) and not l.startswith(("+++", "---"))))
+        changed = [l for l in fh
+                   if (l.startswith(("+", "-")) and not l.startswith(("+++", "---")))]
+    body = "".join(changed)
     digest = hashlib.sha256(body.encode()).hexdigest()
+    m["line_level"] = line_level([l[1:] for l in changed if l[0] == "-"],
+                                 [l[1:] for l in changed if l[0] == "+"])
     m["patch_sha256"] = digest
     if digest in seen:
         m["duplicate_of"] = seen[digest]
@@ -337,7 +389,8 @@ with open(report_path, "w", encoding="utf-8") as fh:
 
 ok  = sum(1 for m in mutants if m.get("apply_ok"))
 dup = sum(1 for m in mutants if m.get("duplicate_of"))
-print(f"{len(mutants)} {ok} {dup} {len(orphans)}")
+lvl = sum(1 for m in mutants if m.get("line_level"))
+print(f"{len(mutants)} {ok} {dup} {len(orphans)} {lvl}")
 PY
 }
 
@@ -504,6 +557,7 @@ if [[ -s "$REPORT_FILE" ]] && jq empty "$REPORT_FILE" 2>/dev/null; then
        --arg target "$TARGET_NAME" \
        --argjson requested "$MUTANT_COUNT" \
        --argjson compilecheck "$COMPILE_CHECK" \
+       --argjson structural "$STRUCTURAL" \
        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
        --argjson elapsed "$ELAPSED" \
        '. + {target: ((.target // {}) + {file: $file, file_lines: $filelines,
@@ -514,13 +568,15 @@ if [[ -s "$REPORT_FILE" ]] && jq empty "$REPORT_FILE" 2>/dev/null; then
              bips_repo: {commit: $bipscommit, head: $bipsdesc},
              harness: {target: $target, model: $model, requested_mutants: $requested,
                        compile_checked: ($compilecheck == 1),
+                       structural: ($structural == 1),
                        finished_at: $ts, duration_seconds: $elapsed}}' \
        "$REPORT_FILE" > "$TMP" && mv "$TMP" "$REPORT_FILE"
 
     STATS="$(validate_patches)"
     if [[ -n "$STATS" ]]; then
-        read -r N_TOTAL N_OK N_DUP N_ORPHAN <<< "$STATS"
+        read -r N_TOTAL N_OK N_DUP N_ORPHAN N_LINE <<< "$STATS"
         log "patches: $N_TOTAL claimed, $N_OK apply cleanly, $N_DUP duplicates, $N_ORPHAN orphaned"
+        log "         $N_LINE line-level (a line-by-line tool makes these too)"
     else
         log "warning: patch validation failed; apply_ok fields are unreliable"
     fi

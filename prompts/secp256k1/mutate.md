@@ -52,6 +52,8 @@ $FOCUS_TEXT
 
 $OPS_TEXT
 
+$STRUCTURAL_TEXT
+
 Do not modify any file other than `$TARGET_FILE`. A patch that touches a second
 file is discarded by the harness. Do not modify tests to make a mutant survive:
 the mutant must survive the tests as they are.
@@ -159,6 +161,10 @@ review more easily.
 - `scope` - move a block into or out of an `if`/`else`/loop, hoist code out of
   a conditional so it runs unconditionally, or sink unconditional code into a
   branch.
+- `injection` - add a call or statement the original does not make: an extra
+  `_negate` or `_normalize_weak` on a field element, a clear of a value before
+  its last use, a second `secp256k1_sha256_write` of a field already hashed, a
+  defensive-looking early return on an input that does occur.
 - `boundary` - `<` vs `<=`, off-by-one against a named limit, a loop bound that
   stops one short or one over, a range check that admits the order or the
   field prime itself.
@@ -210,7 +216,7 @@ per mutant, named `<id>.patch`.
 
 Do not write `target`, `repo`, `bips_repo`, `harness`, `patch`, `apply_ok`,
 `files_touched`, `lines_added`, `lines_removed`, `patch_sha256`, `compiles_ok`,
-`compile_error`, or
+`compile_error`, `line_level`, or
 `duplicate_of`: the harness stamps those itself after you exit by re-checking
 every patch against git, and anything you put there is overwritten. Write the
 fields below and nothing else.
@@ -231,7 +237,7 @@ fields below and nothing else.
     {
       "id": "mut-001",
       "title": "one line, specific: what the mutant does",
-      "operator": "deletion | relocation | reorder | scope | boundary | condition | constant | state | error-handling | numeric | early-exit | constant-time | serialization",
+      "operator": "deletion | relocation | reorder | scope | injection | boundary | condition | constant | state | error-handling | numeric | early-exit | constant-time | serialization",
       "location": {
         "function": "enclosing function",
         "lines": "1234-1240 (in the original file)"

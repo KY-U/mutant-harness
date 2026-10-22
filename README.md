@@ -24,6 +24,7 @@ mutant-harness --file src/pow.cpp --verify                 # build and test the 
 mutant-harness --file src/pow.cpp --verify --export        # write live mutants to out/import.json
 mutant-harness --target secp256k1 --file src/group_impl.h --verify
 mutant-harness --file src/validation.cpp --pr 12345        # mutate a pull request's head
+mutant-harness --file src/net_processing.cpp --structural  # skip what a line-level tool would make
 mutant-harness --verify-only results/src-pow-cpp-latest --verify-arg --resume
 mutant-harness --apply results/.../out/patches/mut-003.patch --repo ~/src/bitcoin
 ```
@@ -47,6 +48,7 @@ results/<file-slug>-<timestamp>/out/
 
 - **apply_ok**: patch re-checked with `git apply --check`.
 - **compiles_ok**: the touched translation unit is syntax-checked.
+- **line_level**: the patch is a one-token swap or a single-line deletion, which a line-level tool also makes. With `--structural` the agent is told to avoid these and they are not verified.
 - **--review**: a fresh agent grades each mutant `sneaky`, `likely-killed`, `equivalent` or `invalid`.
 - **--verify**: builds and runs the test suites per mutant. Status is `live`, `live-unit`, `dead`, `build-failed` or `apply-failed`. Failing tests are re-run once to rule out flakes.
 
