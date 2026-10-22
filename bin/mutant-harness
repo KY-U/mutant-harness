@@ -382,19 +382,36 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
         "https://api.github.com/repos/${REPO_PATH}/pulls/$PR")" \
         || die "cannot download the diff of pull request #$PR"
     files=()
-    while IFS= read -r f; do
-        if [[ "$f" =~ \.(c|cc|cpp|h|hpp)$ && ! "$f" =~ (^|/)(test|bench) ]]; then
-            files+=("$f")
-        else
+    while IFS=$'\t' read -r has_code f; do
+        if [[ ! "$f" =~ \.(c|cc|cpp|h|hpp)$ || "$f" =~ (^|/)(test|bench) ]]; then
             log "skipping $f (not a source file, or a test or benchmark)"
+        elif [[ "$has_code" == 0 ]]; then
+            log "skipping $f (the PR adds only comments and blank lines to it)"
+        else
+            files+=("$f")
         fi
     # Only files with an added line: a file the PR only deletes from has nothing
-    # left to mutate.
-    done < <(awk '/^diff --git /   { hdr = 1; next }
+    # left to mutate. An added line counts as code unless it is blank or inside
+    # a comment; context lines are followed too, so a /* opened above an added
+    # line is seen. A hunk that starts inside a comment errs towards code.
+    done < <(awk 'function code(s,  i) {
+                      while (1) {
+                          if (incmt) { i = index(s, "*/"); if (!i) return 0; s = substr(s, i + 2); incmt = 0 }
+                          sub(/^[ \t\r]+/, "", s)
+                          if (s == "" || s ~ /^\/\//) return 0
+                          if (s !~ /^\/\*/) return 1
+                          s = substr(s, 3); incmt = 1
+                      }
+                  }
+                  /^diff --git /   { hdr = 1; next }
                   hdr && /^\+\+\+ b\// { f = substr($0, 7) }
-                  hdr && /^@@/   { hdr = 0; next }
-                  !hdr && /^\+/ && f != "" && !(f in seen) { seen[f] = 1; print f }' <<< "$diff")
-    (( ${#files[@]} )) || die "pull request #$PR adds lines to no source file"
+                  hdr && /^@@/   { hdr = 0; incmt = 0; next }
+                  hdr || f == "" || /^-/ { next }
+                  /^@@/          { incmt = 0; next }
+                  { c = code(substr($0, 2)) }
+                  /^\+/ { if (!(f in seen)) { seen[f] = 0; order[++n] = f }; if (c) seen[f] = 1 }
+                  END   { for (i = 1; i <= n; i++) print seen[order[i]] "\t" order[i] }' <<< "$diff")
+    (( ${#files[@]} )) || die "pull request #$PR adds code to no source file"
     log "pull request #$PR: ${#files[@]} file(s): ${files[*]}"
     trap report_time EXIT
 
