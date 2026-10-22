@@ -389,31 +389,43 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
         if [[ ! "$f" =~ \.(c|cc|cpp|h|hpp)$ || "$f" =~ (^|/)(test|bench) ]]; then
             log "skipping $f (not a source file, or a test or benchmark)"
         elif [[ "$has_code" == 0 ]]; then
-            log "skipping $f (the PR adds only comments and blank lines to it)"
+            log "skipping $f (the PR adds only comments, includes and blank lines to it)"
         else
             files+=("$f")
         fi
     # Only files with an added line: a file the PR only deletes from has nothing
-    # left to mutate. An added line counts as code unless it is blank or inside
-    # a comment; context lines are followed too, so a /* opened above an added
-    # line is seen. A hunk that starts inside a comment errs towards code.
-    done < <(awk 'function code(s,  i) {
+    # left to mutate. An added line counts as code unless it is blank, an
+    # #include (it either breaks the build or changes nothing) or inside a
+    # comment; context lines are followed too, so a /* opened above an added line
+    # is seen. A hunk may start inside a comment opened above it, so each hunk is
+    # read both ways, and a */ that closes nothing says it started inside one.
+    done < <(awk 'function code(s,  i, j) {
                       while (1) {
                           if (incmt) { i = index(s, "*/"); if (!i) return 0; s = substr(s, i + 2); incmt = 0 }
                           sub(/^[ \t\r]+/, "", s)
-                          if (s == "" || s ~ /^\/\//) return 0
-                          if (s !~ /^\/\*/) return 1
+                          if (s == "" || s ~ /^\/\// || s ~ /^#[ \t]*include/) return 0
+                          if (s !~ /^\/\*/) {
+                              i = index(s, "*/"); j = index(s, "/*")
+                              if (i && (!j || i < j)) stray = 1
+                              return 1
+                          }
                           s = substr(s, 3); incmt = 1
                       }
                   }
-                  /^diff --git /   { hdr = 1; next }
+                  function flush() {
+                      if (stray_seen ? anyb : anya) seen[f] = 1
+                      anya = anyb = stray_seen = 0; ia = 0; ib = 1
+                  }
+                  /^diff --git /   { flush(); hdr = 1; next }
                   hdr && /^\+\+\+ b\// { f = substr($0, 7) }
-                  hdr && /^@@/   { hdr = 0; incmt = 0; next }
+                  hdr && /^@@/   { hdr = 0; flush(); next }
                   hdr || f == "" || /^-/ { next }
-                  /^@@/          { incmt = 0; next }
-                  { c = code(substr($0, 2)) }
-                  /^\+/ { if (!(f in seen)) { seen[f] = 0; order[++n] = f }; if (c) seen[f] = 1 }
-                  END   { for (i = 1; i <= n; i++) print seen[order[i]] "\t" order[i] }' <<< "$diff")
+                  /^@@/          { flush(); next }
+                  { s = substr($0, 2)
+                    incmt = ia; stray = 0; ca = code(s); ia = incmt; if (stray) stray_seen = 1
+                    incmt = ib; cb = code(s); ib = incmt }
+                  /^\+/ { if (!(f in seen)) { seen[f] = 0; order[++n] = f }; if (ca) anya = 1; if (cb) anyb = 1 }
+                  END   { flush(); for (i = 1; i <= n; i++) print seen[order[i]] "\t" order[i] }' <<< "$diff")
     (( ${#files[@]} )) || die "pull request #$PR adds code to no source file"
     log "pull request #$PR: ${#files[@]} file(s): ${files[*]}"
     trap report_time EXIT
