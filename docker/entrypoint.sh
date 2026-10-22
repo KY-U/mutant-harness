@@ -132,6 +132,42 @@ PY
 )" || die "cannot mutate $TARGET_FILE for pull request #$PR"
     LINE_RANGE="$PR_LINES"
     log "pull request #$PR adds lines $PR_LINES"
+
+    # Pre-feed what the agent would otherwise spend most of its turns finding:
+    # the PR's description, its diff of this file, the tests it changes, and the
+    # BIPs it names.
+    curl -fsSL --retry 3 "https://api.github.com/repos/${REPO_PATH}/pulls/$PR" -o /work/pr.json \
+        || log "warning: cannot fetch the description of pull request #$PR"
+    PR_TITLE="$(jq -r '.title // ""' /work/pr.json 2>/dev/null)"
+    PR_BODY="$(jq -r '.body // ""' /work/pr.json 2>/dev/null | head -c 3000)"
+    PR_CONTEXT="$(python3 - /work/pr.diff "$TARGET_FILE" "$BIPS_SRC" "$PR_TITLE $PR_BODY" <<'PY'
+import glob, re, sys
+path, target, bips, desc = sys.argv[1:]
+blocks, cur = {}, None
+for l in open(path, encoding="utf-8", errors="replace"):
+    m = re.match(r"diff --git a/\S+ b/(\S+)", l)
+    if m:
+        cur = m.group(1)
+        blocks[cur] = []
+    if cur:
+        blocks[cur].append(l)
+tests = [f for f in blocks if re.search(r"(^|/)(tests?|fuzz)([/_.]|$)", f)]
+with open("/work/pr-tests.diff", "w") as fh:
+    for f in tests:
+        fh.writelines(blocks[f])
+own = "".join(blocks.get(target, []))
+open("/work/pr-file.diff", "w").write(own)
+nums = sorted({int(n) for n in re.findall(r"\bBIP[ -]?0*(\d{1,4})\b", desc + own, re.I)})
+found = [p for n in nums for p in glob.glob(f"{bips}/bip-{n:04d}.*") if re.search(r"\.(mediawiki|md)$", p)]
+print("- Tests the PR changes: " + (", ".join(f"`{f}`" for f in tests) + "; their diff is in `/work/pr-tests.diff`. Read it first: the new code's coverage is mostly there." if tests else "none. The new code is likely untested; confirm with one `rg` per new function name in the test directories."))
+print("- Specs: " + (", ".join(f"`{p}`" for p in found) + ". Read only the sections that match the added code." if found else "the PR names no BIP. Do not search the BIPs repo unless the added code clearly implements one."))
+print("@@DIFF@@")
+lines = own.splitlines()
+print(own if len(lines) <= 400 else f"(too long to inline: {len(lines)} lines; read /work/pr-file.diff)")
+PY
+)" || die "cannot prepare the context of pull request #$PR"
+    PR_FILE_DIFF="${PR_CONTEXT#*@@DIFF@@$'\n'}"
+    PR_CONTEXT="${PR_CONTEXT%%$'\n'@@DIFF@@*}"
 fi
 
 # A dirty target file would make every `git diff` the agent takes include
@@ -144,7 +180,33 @@ fi
 # Human-readable framing for the prompt, so an unset flag reads as a sentence
 # rather than as an empty placeholder.
 if [[ -n "$PR" ]]; then
-    RANGE_TEXT="This run tests pull request #$PR. Restrict every mutation to the lines it adds to the file: $PR_LINES. Code the PR did not touch is out of scope however interesting it is; a mutant that changes any other line is discarded by the harness. The PR's full diff is at /work/pr.diff."
+    RANGE_TEXT="$(cat <<EOF
+This run tests pull request #$PR: "$PR_TITLE". Mutate only the lines it adds
+to the file: $PR_LINES. A mutant that changes any other line is discarded.
+
+**PR mode. These rules replace Method steps 1-3.** The context below is already
+gathered; do not re-derive it.
+
+- Read only the functions that contain the added lines, plus the direct callers
+  of any function the PR adds (one \`rg\` each). Do not read the rest of the file.
+$PR_CONTEXT
+- Skip \`/work/coverage.md\`; record what you learn in \`coverage_map\`.
+- Quality over quantity. Write at most $MUTANT_COUNT mutants, and only
+  \`critical\`, \`high\` or \`medium\` ones. **Never write a \`low\` mutant**: it
+  is not worth reporting. Two strong mutants beat six weak ones. If the added
+  code supports nothing above \`low\`, write zero mutants and say why in \`notes\`.
+
+PR description:
+
+$PR_BODY
+
+The PR's diff of \`$TARGET_FILE\` (full diff: \`/work/pr.diff\`):
+
+\`\`\`diff
+$PR_FILE_DIFF
+\`\`\`
+EOF
+)"
 elif [[ -n "$LINE_RANGE" ]]; then
     RANGE_TEXT="Restrict every mutation to lines $LINE_RANGE of the file. Mutants outside that range will be discarded."
 else

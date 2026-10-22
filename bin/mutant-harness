@@ -12,7 +12,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET="core"
 
 TARGET_FILE=""
-COUNT=12
+COUNT=""
 FOCUS=""
 LINE_RANGE=""
 OPS=""
@@ -62,7 +62,8 @@ Options:
                        (e.g. src/script/interpreter.cpp). Required, unless
                        --pr is given: then every source file the PR adds
                        lines to is mutated, one run each
-  --count <n>          How many mutants to aim for (default: 12)
+  --count <n>          How many mutants to aim for (default: 12, or 6 with
+                       --pr, which also drops low-severity ones)
   --focus <text>       Steer the agent at one area ("segwit v1 witness parsing",
                        "the fee estimator", a function name, ...)
   --lines <a-b>        Restrict mutations to this line range of the file
@@ -325,7 +326,7 @@ build_image() {
 }
 
 # What this harness needs the image to contain. Bumped in the Dockerfile too.
-IMAGE_VERSION=9
+IMAGE_VERSION=10
 
 image_label() {
     docker image inspect "$IMAGE" --format "{{index .Config.Labels \"$1\"}}" 2>/dev/null
@@ -468,6 +469,7 @@ fi
 TARGET_FILE="${TARGET_FILE#./}"
 [[ "$TARGET_FILE" != /* ]]   || die "--file must be relative to the Core tree, got: $TARGET_FILE"
 [[ "$TARGET_FILE" != *..* ]] || die "--file must not contain '..': $TARGET_FILE"
+[[ -n "$COUNT" ]] || { [[ -n "$PR" ]] && COUNT=6 || COUNT=12; }
 [[ "$COUNT" =~ ^[0-9]+$ ]] && (( COUNT > 0 )) || die "--count takes a positive number, got: $COUNT"
 [[ -z "$LINE_RANGE" || "$LINE_RANGE" =~ ^[0-9]+-[0-9]+$ ]] || die "--lines takes a-b, got: $LINE_RANGE"
 [[ -z "$PR" || "$PR" =~ ^[0-9]+$ ]] || die "--pr takes a pull request number, got: $PR"

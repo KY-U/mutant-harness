@@ -62,7 +62,7 @@ $COMPILE_TEXT
 
 ## Method
 
-Work in this order and do not skip ahead.
+Work in this order and do not skip ahead, unless Scope replaces a step.
 
 1. **Read the whole file.** Not a skim. Understand what it is responsible for,
    which invariants it maintains, what its callers assume, what its return
