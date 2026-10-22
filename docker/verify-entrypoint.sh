@@ -11,6 +11,7 @@ BUILD_DIR="${VERIFY_BUILD_DIR:-build}"
 PATCH_DIR="${PATCH_DIR:-/out/patches}"
 VERIFY_ONLY="${VERIFY_ONLY:-}"
 VERIFY_COMMIT="${VERIFY_COMMIT:-}"
+moved=""
 
 log() { printf '[verify] %s\n' "$*" >&2; }
 die() { printf '[verify] error: %s\n' "$*" >&2; exit 1; }
@@ -37,6 +38,7 @@ if [[ -n "$VERIFY_COMMIT" ]]; then
         git -C "$BITCOIN_SRC" fetch --depth 1 origin "$VERIFY_COMMIT" 2>/dev/null \
             && git -C "$BITCOIN_SRC" checkout -q --detach FETCH_HEAD \
             || die "cannot put the tree at $VERIFY_COMMIT. Rebuild the image (--rebuild), or verify against your own clone (--verify-repo <path>)."
+        moved="$(git -C "$BITCOIN_SRC" diff --name-only "$HAVE" HEAD)"
     fi
 fi
 
@@ -64,6 +66,13 @@ fi
 STAMP="$BUILD_PATH/.harness-tree"
 current="$(git -C "$BITCOIN_SRC" ls-files -s | awk -F'\t' '{ split($1, a, " "); print a[2] "\t" $2 }')"
 stale=""
+# The checkout above gave every file it rewrote a fresh mtime, newer than every
+# object, so make would rebuild the world in each container. Those the volume
+# records as built from these same contents are not stale: age them back.
+if [[ -n "$moved" && -f "$STAMP" ]]; then
+    grep -xFf "$STAMP" <<< "$current" | cut -f2 | grep -xFf <(printf '%s\n' "$moved") \
+        | (cd "$BITCOIN_SRC" && xargs -d '\n' -r touch -d @0 --)
+fi
 if [[ -f "$STAMP" ]]; then
     stale="$(grep -vxFf "$STAMP" <<< "$current" | cut -f2)"
 elif [[ -d "$BUILD_PATH/src" ]]; then
@@ -81,4 +90,13 @@ ARGS=(--repo "$BITCOIN_SRC" --patches "$PATCH_DIR" --build-dir "$BUILD_DIR")
 [[ -n "$VERIFY_ONLY" ]] && ARGS+=(--only "$VERIFY_ONLY")
 
 log "mutant-verify ${ARGS[*]} $*"
-exec mutant-verify "${ARGS[@]}" "$@"
+mutant-verify "${ARGS[@]}" "$@"
+rc=$?
+
+# mutant-verify reverts the last mutant but does not rebuild it. Build the clean
+# tree once; if that succeeds the volume holds exactly this tree, so record all
+# of it, or the next container would rebuild everything left out above.
+if cmake --build "$BUILD_PATH" -j "$(nproc)" >/dev/null 2>&1; then
+    printf '%s\n' "$current" > "$STAMP"
+fi
+exit $rc
