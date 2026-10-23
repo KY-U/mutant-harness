@@ -195,6 +195,9 @@ $PR_CONTEXT
   \`critical\`, \`high\` or \`medium\` ones. **Never write a \`low\` mutant**: it
   is not worth reporting. Two strong mutants beat six weak ones. If the added
   code supports nothing above \`low\`, write zero mutants and say why in \`notes\`.
+- Zero mutants is a good result: it means the PR's tests already catch every
+  plausible mistake in the added code, and a reviewer wants to know that. Do
+  not raise a severity, or settle for an implausible mutant, to avoid it.
 
 PR description:
 

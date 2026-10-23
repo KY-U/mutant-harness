@@ -167,7 +167,12 @@ review more easily.
   statement, check every name it uses is still in scope at the new place and
   then let `tu-check` settle it, if this run has it.
 - **Plausible.** It should read like a normal line of Core, in the style of the
-  surrounding code. If the diff makes a reviewer stop, it is a bad mutant.
+  surrounding code. If the diff makes a reviewer stop, it is a bad mutant. It
+  must also be a mistake someone would actually make: not a type nobody would
+  choose there (a `uint8_t` counter over inputs), not a constant nobody would
+  type. Judge the edit alone, not its trigger: a bug that needs hundreds of
+  inputs to show is fine if an attacker can build them (that is Reachable's
+  question). If you have to argue the edit is plausible, it is not.
 - **Consequential.** Prefer mutants that break a written rule (a BIP MUST, a
   documented invariant, an assert's premise) over ones that break nothing in
   particular.
