@@ -388,6 +388,8 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
     while IFS=$'\t' read -r has_code f; do
         if [[ ! "$f" =~ \.(c|cc|cpp|h|hpp)$ || "$f" =~ (^|/)(test|bench) ]]; then
             log "skipping $f (not a source file, or a test or benchmark)"
+        elif [[ "$f" == src/qt/* && "$CMAKE_FLAGS" == *-DBUILD_GUI=OFF* ]]; then
+            log "skipping $f (the GUI is not built, so no mutant of it can be verified)"
         elif [[ "$has_code" == 0 ]]; then
             log "skipping $f (the PR adds only comments, includes and blank lines to it)"
         else
