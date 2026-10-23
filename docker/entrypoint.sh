@@ -140,6 +140,9 @@ PY
         || log "warning: cannot fetch the description of pull request #$PR"
     PR_TITLE="$(jq -r '.title // ""' /work/pr.json 2>/dev/null)"
     PR_BODY="$(jq -r '.body // ""' /work/pr.json 2>/dev/null | head -c 3000)"
+    curl -fsSL --retry 3 "https://api.github.com/repos/${REPO_PATH}/pulls/$PR/commits?per_page=100" -o /work/pr-commits.json \
+        || log "warning: cannot fetch the commits of pull request #$PR"
+    PR_COMMITS="$(jq -r '.[] | "- " + .commit.message' /work/pr-commits.json 2>/dev/null | head -c 3000)"
     PR_CONTEXT="$(python3 - /work/pr.diff "$TARGET_FILE" "$BIPS_SRC" "$PR_TITLE $PR_BODY" <<'PY'
 import glob, re, sys
 path, target, bips, desc = sys.argv[1:]
@@ -206,6 +209,12 @@ $PR_CONTEXT
 PR description:
 
 $PR_BODY
+
+Commit messages (they say what each commit means to change; a \`refactor:\` one
+claims no behavior change, but where a message disagrees with the diff, the diff
+wins):
+
+$PR_COMMITS
 
 The PR's diff of \`$TARGET_FILE\` (full diff: \`/work/pr.diff\`):
 
