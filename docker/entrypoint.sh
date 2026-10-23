@@ -198,6 +198,10 @@ $PR_CONTEXT
 - Zero mutants is a good result: it means the PR's tests already catch every
   plausible mistake in the added code, and a reviewer wants to know that. Do
   not raise a severity, or settle for an implausible mutant, to avoid it.
+- Mutate behavior the PR changes, not lines it only reshapes (a new signature or
+  return type, a \`(void)\` cast, a rename). Ask: would this mutant survive the
+  same way on the base commit? If yes, it is a gap master already had: leave it
+  out, unless the PR's new code depends on that behavior.
 
 PR description:
 
