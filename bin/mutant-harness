@@ -158,6 +158,24 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Prefix every line with the file being run
+if [[ -z "${MUTANT_HARNESS_PREFIXED:-}" && "$SHELL_MODE" == 0 && "$DETACH" == 0 && -z "$APPLY_PATCH" ]]; then
+    prefix_file="$TARGET_FILE"
+    if [[ -z "$prefix_file" && -n "$VERIFY_ONLY_DIR" ]] && command -v jq >/dev/null; then
+        for m in "$VERIFY_ONLY_DIR/out/mutants.json" "$VERIFY_ONLY_DIR/mutants.json"; do
+            [[ -f "$m" ]] || continue
+            prefix_file="$(jq -r '.target.file // empty' "$m" 2>/dev/null || true)"
+            break
+        done
+    fi
+    if [[ -n "$prefix_file" ]]; then
+        prefix_file="${prefix_file#./}"
+        rc=0
+        MUTANT_HARNESS_PREFIXED=1 "$0" "${ORIG_ARGS[@]}" 2>&1 | sed -u "s|^|[${prefix_file#src/}] |" || rc=$?
+        exit "$rc"
+    fi
+fi
+
 # --------------------------------------------------------------- target ----
 # Everything that differs between targets - repo, image, cmake flags, header
 # check units, verify stages - lives in one profile.
@@ -495,8 +513,7 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
         mkdir -p "$work" && printf '%s\n' "$diff" > "$work/pr.diff"
         [[ -n "$pr_json" ]] && printf '%s\n' "$pr_json" > "$work/pr.json"
         [[ -n "$pr_commits" ]] && printf '%s\n' "$pr_commits" > "$work/pr-commits.json"
-        ( MUTANT_HARNESS_STAMP="$stamp" "$0" "${gen_args[@]}" --file "$f" 2>&1 \
-              | sed -u "s|^|[${f##*/}] |" ) &
+        MUTANT_HARNESS_STAMP="$stamp" "$0" "${gen_args[@]}" --file "$f" &
         pids+=("$!")
     done
     failed=() generated=()
