@@ -38,6 +38,7 @@ TIMEOUT=""
 DETACH=0
 APPLY_PATCH=""
 EXTRA_DOCKER_ARGS=()
+WORKERS=1
 
 log()  { printf '\033[36m[mutant-harness]\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m[mutant-harness]\033[0m %s\n' "$*" >&2; }
@@ -98,6 +99,10 @@ Options:
   --verify-only <dir>  Verify an existing run directory and exit: no agent, no
                        generation. Use it to resume an interrupted verification
                        (with --verify-arg --resume) or to verify an old run.
+  --workers <n>        With --pr --verify, verify up to n files at once, each in
+                       its own copy of the build volume (default: 1). Every
+                       copy is another ~5 GB of disk and another test suite's
+                       worth of RAM.
   --export             After verification, write the live mutants to
                        out/import.json with bin/mutant-export
   --update-core        git fetch master inside the container first
@@ -153,6 +158,7 @@ while [[ $# -gt 0 ]]; do
         --shell)          SHELL_MODE=1; shift ;;
         --apply)          APPLY_PATCH="${2:?}"; shift 2 ;;
         --docker-arg)     EXTRA_DOCKER_ARGS+=("${2:?}"); shift 2 ;;
+        --workers)        WORKERS="${2:?}"; shift 2 ;;
         -h|--help)        usage; exit 0 ;;
         *)                die "unknown option: $1 (try --help)" ;;
     esac
@@ -397,6 +403,7 @@ slug_of() { printf '%s' "$1" | tr '/.' '--' | sed 's/^-*//'; }
 if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
     [[ "$PR" =~ ^[0-9]+$ ]] || die "--pr takes a pull request number, got: $PR"
     [[ "$SHELL_MODE" == 0 ]] || die "--shell needs --file"
+    [[ "$WORKERS" =~ ^[1-9][0-9]*$ ]] || die "--workers takes a positive number, got: $WORKERS"
     command -v curl >/dev/null || die "--pr without --file needs curl"
     REPO_PATH="${REPO_URL#https://github.com/}"; REPO_PATH="${REPO_PATH%.git}"
     diff="$(curl -fsSL --retry 3 -H "Accept: application/vnd.github.v3.diff" \
@@ -459,6 +466,7 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --rebuild)                    shift ;;
+            --workers)                    shift 2 ;;
             --verify|--export)            ver_args+=("$1"); shift ;;
             --verify-repo|--verify-arg)   ver_args+=("$1" "$2"); shift 2 ;;
             --target|--repo|--docker-arg) gen_args+=("$1" "$2"); ver_args+=("$1" "$2"); shift 2 ;;
@@ -526,15 +534,55 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
         fi
     done
     if [[ "$VERIFY" == 1 ]]; then
+        # One at a time until a file has run the baseline, which also leaves the
+        # volume built at this commit.
+        queue=(${generated[@]+"${generated[@]}"})
         baseline=()
-        for f in ${generated[@]+"${generated[@]}"}; do
+        while (( ${#queue[@]} )) && (( ${#baseline[@]} == 0 )); do
+            f="${queue[0]}"; queue=("${queue[@]:1}")
             dir="$OUT_ROOT/$(slug_of "$f")-$stamp"
             log "=== $f: verifying ==="
-            "$0" "${ver_args[@]}" ${baseline[@]+"${baseline[@]}"} --verify-only "$dir" \
-                || { failed+=("$f"); continue; }
+            "$0" "${ver_args[@]}" --verify-only "$dir" || { failed+=("$f"); continue; }
             # No verify dir means nothing was runnable, and no baseline ran.
             [[ -d "$dir/out/verify" ]] && baseline=(--verify-arg --no-baseline)
         done
+        # The rest are shared out between workers, each with its own copy of that
+        # built volume: they cannot share one build tree. A host clone is one
+        # tree, so --verify-repo stays serial.
+        n="$WORKERS"
+        [[ -n "$VERIFY_REPO" ]] && n=1
+        (( n > ${#queue[@]} )) && n=${#queue[@]}
+        claims="$(mktemp -d)"
+        vols=("$VERIFY_VOLUME")
+        for ((w = 2; w <= n; w++)); do
+            vols+=("$VERIFY_VOLUME-w$w")
+            log "copying build volume $VERIFY_VOLUME to ${vols[-1]}"
+            # Mounted where the image's world-writable build dir is, a new volume
+            # takes that mode; anywhere else it is root's. cp -a keeps the mtimes
+            # that tell make it is all built.
+            docker run --rm --user "$(id -u):$(id -g)" -v "$VERIFY_VOLUME:/a:ro" -v "${vols[-1]}:/src/bitcoin/build" \
+                --entrypoint sh "$IMAGE" -c 'find /src/bitcoin/build -mindepth 1 -delete \
+                    && find /a -mindepth 1 -maxdepth 1 -exec cp -a -t /src/bitcoin/build {} +' \
+                || die "cannot copy build volume $VERIFY_VOLUME to ${vols[-1]}"
+        done
+        wpids=()
+        for ((w = 0; w < n; w++)); do
+            (
+                # Each file goes to whichever worker claims it first.
+                for i in "${!queue[@]}"; do
+                    mkdir "$claims/$i" 2>/dev/null || continue
+                    f="${queue[$i]}"
+                    log "=== $f: verifying (worker $((w + 1))) ==="
+                    MUTANT_HARNESS_BUILD_VOLUME="${vols[$w]}" "$0" "${ver_args[@]}" \
+                        ${baseline[@]+"${baseline[@]}"} --verify-only "$OUT_ROOT/$(slug_of "$f")-$stamp" \
+                        || printf '%s\n' "$f" >> "$claims/failed"
+                done
+            ) &
+            wpids+=("$!")
+        done
+        (( ${#wpids[@]} )) && wait "${wpids[@]}"
+        [[ -f "$claims/failed" ]] && mapfile -t -O "${#failed[@]}" failed < "$claims/failed"
+        rm -rf "$claims"
     fi
     (( ${#failed[@]} == 0 )) || die "failed: ${failed[*]}"
     log "all ${#files[@]} file(s) of pull request #$PR done"
