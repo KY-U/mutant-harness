@@ -498,9 +498,13 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
 
     # One stamp for every file, so each run dir is known here.
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    # What the harness itself brings to a run: the image, the scripts in it, the
+    # prompts and the profile. A change to any of them must not reuse old mutants.
+    harness_key="v$IMAGE_VERSION-$(cat "$HERE"/docker/{Dockerfile,entrypoint.sh,verify-entrypoint.sh,tu-check} \
+        "$HERE/prompts/$TARGET_NAME"/*.md "$PROFILE" | git hash-object --stdin | cut -c1-12)"
     pids=() keys=()
     for f in "${files[@]}"; do
-        key="${blobs_of[$f]:-} ${gen_args[*]}"
+        key="${blobs_of[$f]:-} $harness_key ${gen_args[*]}"
         keys+=("$key")
         prev="$(cached_run "$f" "$key")"
         if [[ -n "$prev" && -n "$head" ]]; then
