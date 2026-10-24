@@ -16,7 +16,7 @@ ARG CLONE_DEPTH=1
 LABEL org.mutant-harness.kind="core-mutant-gen"
 # Bump when the image gains something a run now depends on; the harness rebuilds
 # any older image rather than failing inside the container.
-LABEL org.mutant-harness.version="10"
+LABEL org.mutant-harness.version="11"
 LABEL org.mutant-harness.target="${TARGET_NAME}"
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # can be syntax-checked.
         build-essential \
         cmake \
+        ninja-build \
         pkgconf \
         ${APT_PACKAGES} \
     && rm -rf /var/lib/apt/lists/*
@@ -65,13 +66,14 @@ RUN chmod -R a+rwX /src/bitcoin /src/bips \
 
 COPY tu-check /usr/local/bin/tu-check
 # Configure the tree - configure only, no target is built. That is what writes
-# compile_commands.json and the generated headers a single translation unit
-# needs, in about a minute and a few MB rather than a full build. Non-fatal: if
+# compile_commands.json, in about a minute and a few MB rather than a full build.
+# Headers that build steps generate are not there yet; tu-check builds the one a
+# unit is missing, which takes Ninja. Non-fatal: if
 # it fails, the run still works and the entrypoint says the check is off. The
 # commit is recorded so the entrypoint can tell whether this build dir still
 # describes the tree it is pointed at.
 RUN chmod +x /usr/local/bin/tu-check; \
-    if cmake -B /src/build -S /src/bitcoin \
+    if cmake -G Ninja -B /src/build -S /src/bitcoin \
              -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
              ${CMAKE_FLAGS}; then \
         git -C /src/bitcoin rev-parse HEAD > /src/build-commit.txt; \

@@ -288,7 +288,7 @@ setup_compile_check() {
     if [[ ! -f "$BITCOIN_BUILD/compile_commands.json" || "$baked" != "$CORE_COMMIT" ]]; then
         log "build dir does not describe $CORE_COMMIT; reconfiguring (a few seconds) ..."
         BITCOIN_BUILD=/tmp/mutant-build
-        if ! cmake -B "$BITCOIN_BUILD" -S "$BITCOIN_SRC" \
+        if ! cmake -G Ninja -B "$BITCOIN_BUILD" -S "$BITCOIN_SRC" \
                    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON $CMAKE_FLAGS \
                    >/tmp/cmake-configure.log 2>&1; then
             log "warning: cmake configure failed (see /tmp/cmake-configure.log); compile check off"

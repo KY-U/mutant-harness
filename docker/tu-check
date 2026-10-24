@@ -18,6 +18,7 @@ header is checked through: every one of them that includes it must compile.
 """
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -69,9 +70,38 @@ def syntax_only(args):
     return out
 
 
-def run(entry, build, args):
-    return subprocess.run(args, cwd=entry.get("directory", build),
+MISSING = re.compile(r"fatal error: (\S+): No such file or directory")
+
+
+def generate(build, header):
+    """Build the generated file that `header` names, if the build makes one.
+
+    A configure-only build dir has none of the headers build steps write (Core's
+    embedded asmap, the test data), so a unit including one cannot compile. Only
+    a Ninja build can make a single output by its path, so that is how the build
+    dirs here are configured.
+    """
+    proc = subprocess.run(["ninja", "-C", build, "-t", "targets", "all"],
                           capture_output=True, text=True)
+    if proc.returncode != 0:
+        return False
+    for line in proc.stdout.splitlines():
+        out = line.rpartition(": ")[0]
+        if out == header or out.endswith("/" + header):
+            return subprocess.run(["ninja", "-C", build, out],
+                                  capture_output=True, text=True).returncode == 0
+    return False
+
+
+def run(entry, build, args):
+    built = set()
+    while True:
+        proc = subprocess.run(args, cwd=entry.get("directory", build),
+                              capture_output=True, text=True)
+        m = MISSING.search(proc.stderr)
+        if proc.returncode == 0 or not m or m.group(1) in built or not generate(build, m.group(1)):
+            return proc
+        built.add(m.group(1))
 
 
 def entry_args(entry):
