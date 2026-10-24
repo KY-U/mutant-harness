@@ -456,9 +456,10 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
         /^diff --git / { idx = "" }
         /^index /      { idx = $2 }
         /^\+\+\+ b\//  { print substr($0, 7) "\t" idx }' <<< "$diff")
+    pr_json="$(curl -fsSL --retry 3 "https://api.github.com/repos/${REPO_PATH}/pulls/$PR")" || pr_json=""
+    pr_commits="$(curl -fsSL --retry 3 "https://api.github.com/repos/${REPO_PATH}/pulls/$PR/commits?per_page=100")" || pr_commits=""
     head=""
-    command -v jq >/dev/null && head="$(curl -fsSL --retry 3 \
-        "https://api.github.com/repos/${REPO_PATH}/pulls/$PR" | jq -r '.head.sha // empty')"
+    command -v jq >/dev/null && head="$(jq -r '.head.sha // empty' <<< "$pr_json")"
     cached_run() {  # cached_run <file> <key>: the newest earlier run dir made with that key
         local d found=""
         for d in "$OUT_ROOT/$(slug_of "$1")"-*/; do
@@ -488,6 +489,12 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
             continue
         fi
         log "=== $f: generating ==="
+        # Hand each run what was fetched above: one fetch per file would spend the
+        # unauthenticated API's 60 requests an hour on a single PR.
+        work="$OUT_ROOT/$(slug_of "$f")-$stamp/work"
+        mkdir -p "$work" && printf '%s\n' "$diff" > "$work/pr.diff"
+        [[ -n "$pr_json" ]] && printf '%s\n' "$pr_json" > "$work/pr.json"
+        [[ -n "$pr_commits" ]] && printf '%s\n' "$pr_commits" > "$work/pr-commits.json"
         ( MUTANT_HARNESS_STAMP="$stamp" "$0" "${gen_args[@]}" --file "$f" 2>&1 \
               | sed -u "s|^|[${f##*/}] |" ) &
         pids+=("$!")

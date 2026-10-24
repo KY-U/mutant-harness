@@ -64,8 +64,9 @@ if [[ -n "$PR" ]]; then
         || die "cannot fetch pull request #$PR"
     REPO_PATH="${REPO_URL#https://github.com/}"; REPO_PATH="${REPO_PATH%.git}"
     # A depth-1 clone has no merge base to diff against; GitHub's diff is taken
-    # against it, numbered as the head we just checked out.
-    curl -fsSL --retry 3 -H "Accept: application/vnd.github.v3.diff" \
+    # against it, numbered as the head we just checked out. A --pr run of every
+    # file hands it over already fetched.
+    [[ -s /work/pr.diff ]] || curl -fsSL --retry 3 -H "Accept: application/vnd.github.v3.diff" \
         "https://api.github.com/repos/${REPO_PATH}/pulls/$PR" -o /work/pr.diff \
         || die "cannot download the diff of pull request #$PR"
 fi
@@ -136,11 +137,11 @@ PY
     # Pre-feed what the agent would otherwise spend most of its turns finding:
     # the PR's description, its diff of this file, the tests it changes, and the
     # BIPs it names.
-    curl -fsSL --retry 3 "https://api.github.com/repos/${REPO_PATH}/pulls/$PR" -o /work/pr.json \
+    [[ -s /work/pr.json ]] || curl -fsSL --retry 3 "https://api.github.com/repos/${REPO_PATH}/pulls/$PR" -o /work/pr.json \
         || log "warning: cannot fetch the description of pull request #$PR"
     PR_TITLE="$(jq -r '.title // ""' /work/pr.json 2>/dev/null)"
     PR_BODY="$(jq -r '.body // ""' /work/pr.json 2>/dev/null | head -c 3000)"
-    curl -fsSL --retry 3 "https://api.github.com/repos/${REPO_PATH}/pulls/$PR/commits?per_page=100" -o /work/pr-commits.json \
+    [[ -s /work/pr-commits.json ]] || curl -fsSL --retry 3 "https://api.github.com/repos/${REPO_PATH}/pulls/$PR/commits?per_page=100" -o /work/pr-commits.json \
         || log "warning: cannot fetch the commits of pull request #$PR"
     PR_COMMITS="$(jq -r '.[] | "- " + .commit.message' /work/pr-commits.json 2>/dev/null | head -c 3000)"
     PR_CONTEXT="$(python3 - /work/pr.diff "$TARGET_FILE" "$BIPS_SRC" "$PR_TITLE $PR_BODY" <<'PY'
