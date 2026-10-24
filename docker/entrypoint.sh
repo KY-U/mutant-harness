@@ -458,7 +458,11 @@ def line_level(removed, added):
 
 def outside(patch_lines):
     """True when the patch changes a line outside `allowed`: a removed line not
-    in it, or an added line with neither neighbour in it."""
+    in it, or an added line with neither neighbour in it. An added line that the
+    patch also removes is a move of that line, so it may land anywhere: the
+    removal already had to be in `allowed`."""
+    moved = {l[1:].strip() for l in patch_lines
+             if l.startswith("-") and not l.startswith("---")}
     old, in_hunk = 0, False
     for l in patch_lines:
         m = re.match(r"@@ -(\d+)", l)
@@ -471,7 +475,7 @@ def outside(patch_lines):
                 return True
             old += 1
         elif l.startswith("+"):
-            if old - 1 not in allowed and old not in allowed:
+            if old - 1 not in allowed and old not in allowed and l[1:].strip() not in moved:
                 return True
         elif l.startswith(" "):
             old += 1
