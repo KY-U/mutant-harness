@@ -644,29 +644,51 @@ run_review_pass() {
         return 0
     fi
 
+    # A mutant the verifier already killed needs no opinion; it goes back in
+    # below as `dead`, with the tests that killed it.
+    local results="$OUT_DIR/verify/results.jsonl" dead='[]'
+    [[ -s "$results" ]] && dead=$(jq -cs '[group_by(.id)[] | last | select(.status == "dead") | .id]' "$results")
+
     local dir=/work/review
     rm -rf "$dir"; mkdir -p "$dir/patches"
-    cp "$MANIFEST_FILE" "$dir/mutants.json"
+    jq --argjson dead "$dead" '.mutants |= map(select(.id as $i | $dead | index($i) | not))' \
+        "$MANIFEST_FILE" > "$dir/mutants.json"
     cp "$PATCH_DIR"/*.patch "$dir/patches/" 2>/dev/null || true
+    [[ "$dead" == "[]" ]] || log "not reviewing $(jq length <<< "$dead") mutant(s) the verifier killed"
+    count=$(jq '.mutants | length' "$dir/mutants.json")
 
     export IN_MUTANTS="$dir/mutants.json"
     export OUT_REVIEWED="$dir/mutants-reviewed.json"
-    PATCH_DIR="$dir/patches" render_prompt "$REVIEW_PROMPT_TEMPLATE" "$dir/prompt.md"
+    local elapsed=0
+    if (( count > 0 )); then
+        PATCH_DIR="$dir/patches" render_prompt "$REVIEW_PROMPT_TEMPLATE" "$dir/prompt.md"
 
-    local stream="$OUT_DIR/review.stream.jsonl"
-    log "reviewing $count mutants in a fresh session (model=$REVIEW_MODEL) ..."
-    local start; start=$(date +%s)
-    run_claude "$dir/prompt.md" "$stream" "$REVIEW_MODEL" "$dir" "$BIPS_SRC"
-    local rc=$? elapsed=$(( $(date +%s) - start ))
-    log "reviewer exited rc=$rc after ${elapsed}s"
+        local stream="$OUT_DIR/review.stream.jsonl"
+        log "reviewing $count mutants in a fresh session (model=$REVIEW_MODEL) ..."
+        local start; start=$(date +%s)
+        run_claude "$dir/prompt.md" "$stream" "$REVIEW_MODEL" "$dir" "$BIPS_SRC"
+        local rc=$?; elapsed=$(( $(date +%s) - start ))
+        log "reviewer exited rc=$rc after ${elapsed}s"
 
-    make_trace "$stream" "$OUT_DIR/review.txt"
-    recover_json "$stream" "$OUT_REVIEWED"
+        make_trace "$stream" "$OUT_DIR/review.txt"
+        recover_json "$stream" "$OUT_REVIEWED"
 
-    if [[ ! -s "$OUT_REVIEWED" ]] || ! jq empty "$OUT_REVIEWED" 2>/dev/null; then
-        log "warning: review pass produced no valid JSON (see $stream)"
-        log "         mutants.json is still the unreviewed generator output"
-        return 0
+        if [[ ! -s "$OUT_REVIEWED" ]] || ! jq empty "$OUT_REVIEWED" 2>/dev/null; then
+            log "warning: review pass produced no valid JSON (see $stream)"
+            log "         mutants.json is still the unreviewed generator output"
+            return 0
+        fi
+    else
+        cp "$dir/mutants.json" "$OUT_REVIEWED"
+    fi
+
+    if [[ "$dead" != "[]" ]]; then
+        jq --slurpfile m "$MANIFEST_FILE" --slurpfile r "$results" --argjson dead "$dead" '
+            .mutants += [$m[0].mutants[] | .id as $i | select($dead | index($i))
+                | ([$r[] | select(.id == $i)] | last) as $v
+                | . + {verdict: "dead", suggested_test: null,
+                       verdict_reason: "Killed by the verifier (\($v.killed_by): \($v.killed_tests // [] | join(", "))); not reviewed."}]' \
+            "$OUT_REVIEWED" > "$OUT_REVIEWED.tmp" && mv "$OUT_REVIEWED.tmp" "$OUT_REVIEWED"
     fi
 
     # The reviewer may only annotate; ids it invented or dropped are a bug, so
@@ -682,6 +704,7 @@ run_review_pass() {
        '. + {review: {model: $model, finished_at: $ts,
                       duration_seconds: $elapsed,
                       good:          [.mutants[]? | select(.verdict == "good")]          | length,
+                      dead:          [.mutants[]? | select(.verdict == "dead")]          | length,
                       sneaky:        [.mutants[]? | select(.verdict == "sneaky")]        | length,
                       likely_killed: [.mutants[]? | select(.verdict == "likely-killed")] | length,
                       noise:         [.mutants[]? | select(.verdict == "noise")]         | length,
@@ -690,7 +713,7 @@ run_review_pass() {
        "$OUT_REVIEWED" > "$REVIEWED_FILE"
 
     log "wrote $REVIEWED_FILE ($(jq -r '.review
-          | "\(.good) good, \(.sneaky) sneaky, \(.likely_killed) likely-killed, \(.noise) noise, \(.equivalent) equivalent, \(.invalid) invalid"' \
+          | "\(.good) good, \(.dead) dead, \(.sneaky) sneaky, \(.likely_killed) likely-killed, \(.noise) noise, \(.equivalent) equivalent, \(.invalid) invalid"' \
           "$REVIEWED_FILE"))"
 }
 

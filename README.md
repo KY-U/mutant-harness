@@ -50,7 +50,7 @@ results/<file-slug>-<timestamp>/out/
 - **apply_ok**: patch re-checked with `git apply --check`.
 - **compiles_ok**: the touched translation unit is syntax-checked.
 - **line_level**: the patch is a one-token swap or a single-line deletion, which a line-level tool also makes. With `--structural` the agent is told to avoid these and they are not verified.
-- **--review**: a fresh agent grades each mutant `good`, `noise` or `invalid` on whether it is worth reporting (secp256k1: `sneaky`, `likely-killed`, `equivalent` or `invalid`).
+- **--review**: a fresh agent grades each mutant `good`, `noise` or `invalid` on whether it is worth reporting; mutants a previous `--verify` killed are marked `dead` without review (secp256k1: `sneaky`, `likely-killed`, `equivalent` or `invalid`).
 - **--verify**: builds and runs the test suites per mutant. Status is `live`, `live-unit`, `dead`, `build-failed` or `apply-failed`. Failing tests are re-run once to rule out flakes.
 
 ## Targets

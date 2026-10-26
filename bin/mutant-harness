@@ -821,13 +821,13 @@ if [[ -s "$MANIFEST" ]] && command -v jq >/dev/null && jq empty "$MANIFEST" 2>/d
         "\([.mutants[]? | select(.line_level)] | length) line-level" +
         "\(if .harness.structural then " (not verified, --structural)" else "" end)",
       (if .review then
-         "review: \(.review.good // 0) good, \(.review.sneaky // 0) sneaky, \(.review.likely_killed // 0) likely-killed, " +
+         "review: \(.review.good // 0) good, \(.review.dead // 0) dead, \(.review.sneaky // 0) sneaky, \(.review.likely_killed // 0) likely-killed, " +
          "\(.review.noise // 0) noise, \(.review.equivalent // 0) equivalent, \(.review.invalid // 0) invalid"
        else "review: not run" end),
       "",
       ((.mutants // []) | sort_by(
           [((.verdict // "good") as $v
-              | ["good","sneaky","likely-killed","noise","equivalent","invalid"] | index($v) // 9),
+              | ["good","sneaky","likely-killed","noise","equivalent","dead","invalid"] | index($v) // 9),
            (.severity_if_undetected as $s
               | ["critical","high","medium","low"] | index($s) // 9)]
         )[] |
