@@ -147,7 +147,7 @@ PY
 
     # Pre-feed what the agent would otherwise spend most of its turns finding:
     # the PR's description, its diff of this file, the tests it changes, and the
-    # BIPs it names.
+    # BIPs this file's diff names.
     [[ -s /work/pr.json ]] || curl -fsSL --retry 3 "https://api.github.com/repos/${REPO_PATH}/pulls/$PR" -o /work/pr.json \
         || log "warning: cannot fetch the description of pull request #$PR"
     PR_TITLE="$(jq -r '.title // ""' /work/pr.json 2>/dev/null)"
@@ -155,9 +155,9 @@ PY
     [[ -s /work/pr-commits.json ]] || curl -fsSL --retry 3 "https://api.github.com/repos/${REPO_PATH}/pulls/$PR/commits?per_page=100" -o /work/pr-commits.json \
         || log "warning: cannot fetch the commits of pull request #$PR"
     PR_COMMITS="$(jq -r '.[] | "- " + .commit.message' /work/pr-commits.json 2>/dev/null | head -c 3000)"
-    PR_CONTEXT="$(python3 - /work/pr.diff "$TARGET_FILE" "$BIPS_SRC" "$PR_TITLE $PR_BODY" <<'PY'
+    PR_CONTEXT="$(python3 - /work/pr.diff "$TARGET_FILE" "$BIPS_SRC" <<'PY'
 import glob, re, sys
-path, target, bips, desc = sys.argv[1:]
+path, target, bips = sys.argv[1:]
 blocks, cur = {}, None
 for l in open(path, encoding="utf-8", errors="replace"):
     m = re.match(r"diff --git a/\S+ b/(\S+)", l)
@@ -172,10 +172,10 @@ with open("/work/pr-tests.diff", "w") as fh:
         fh.writelines(blocks[f])
 own = "".join(blocks.get(target, []))
 open("/work/pr-file.diff", "w").write(own)
-nums = sorted({int(n) for n in re.findall(r"\bBIP[ -]?0*(\d{1,4})\b", desc + own, re.I)})
+nums = sorted({int(n) for n in re.findall(r"\bBIP[ -]?0*(\d{1,4})\b", own, re.I)})
 found = [p for n in nums for p in glob.glob(f"{bips}/bip-{n:04d}.*") if re.search(r"\.(mediawiki|md)$", p)]
 print("- Tests the PR changes: " + (", ".join(f"`{f}`" for f in tests) + "; their diff is in `/work/pr-tests.diff`. Read it first: the new code's coverage is mostly there." if tests else "none. The new code is likely untested; confirm with one `rg` per new function name in the test directories."))
-print("- Specs: " + (", ".join(f"`{p}`" for p in found) + ". Read only the sections that match the added code." if found else "the PR names no BIP. Do not search the BIPs repo unless the added code clearly implements one."))
+print("- Specs: " + (", ".join(f"`{p}`" for p in found) + ". Read only the sections that match the added code." if found else "this file's diff names no BIP. Do not search the BIPs repo unless the added code clearly implements one."))
 print("@@DIFF@@")
 lines = own.splitlines()
 print(own if len(lines) <= 400 else f"(too long to inline: {len(lines)} lines; read /work/pr-file.diff)")
