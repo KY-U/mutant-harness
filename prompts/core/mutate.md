@@ -81,9 +81,11 @@ Work in this order and do not skip ahead, unless Scope replaces a step.
    references, control flow, every path
    returning a value); does it actually change behaviour on some reachable
    input, or is it an equivalent mutant dressed up; is there a test that
-   obviously kills it. Drop the ones that fail. $MUTANT_COUNT is a target, not a
+   obviously kills it; could any test be written that kills it (see Testable
+   below). Drop the ones that fail. $MUTANT_COUNT is a target, not a
    quota: a shorter list of genuinely sneaky mutants is a better result than a
-   padded one.
+   padded one. If nothing in scope is testable, write zero mutants and say why
+   in `summary`.
 
 ## The mutation loop (follow exactly)
 
@@ -162,6 +164,15 @@ review more easily.
 - **Non-equivalent.** It changes observable behaviour on some input. Refactors,
   no-ops, and changes only to logging or error message text are not mutants. If you cannot name
   an input that behaves differently, throw it away.
+- **Testable.** Some test that could be written in Core's own frameworks (unit,
+  fuzz, functional) must be able to see the difference through the code's
+  defined behaviour: a return value, an object's state, a message sent, an RPC
+  result. A surviving mutant is only worth reporting if a test could be added to
+  kill it. Changes visible only in memory after an object is destroyed or freed
+  (wiping secrets in a destructor, `memory_cleanse` vs `memset`), in what the
+  compiler may optimise away, in timing or side channels, or in stack residue
+  are not mutants: no well-defined test can observe them. If you cannot sketch
+  the test that would kill it, throw it away.
 - **Compiles.** No undeclared names, no type mismatches, no missing returns, no
   use-after-move you introduced by relocating a `std::move`. When you relocate a
   statement, check every name it uses is still in scope at the new place and
