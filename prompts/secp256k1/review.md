@@ -1,16 +1,17 @@
-# Task: decide which of these mutants are worth running
+# Task: decide which of these mutants are worth reporting
 
 Another agent planted mutants in a libsecp256k1 file and claims each one is a
 plausible bug that the test suite would miss. Their manifest is in
 `$IN_MUTANTS` and their patches are in `$PATCH_DIR`. You did not generate them
 and you owe their author nothing. Your only job is to decide, mutant by mutant,
-whether it is worth the machine time to compile and test.
+whether it is worth telling the author of the code about it.
 
-Running a mutant costs a library build plus the unit, exhaustive, and
-constant-time suites. An equivalent mutant burns that for a guaranteed
-non-result, a mutant that does not compile burns it for nothing at all, and a
-mutant the first unit test kills teaches nobody anything. Your verdicts are
-what decides where that budget goes.
+A surviving mutant is only worth reporting when it points at a test the author
+should write: a bug a developer could really make, with a consequence someone
+would notice, that a test could reliably catch. A mutant no test catches is not
+enough on its own. One that only changes `VERIFY` code, slows a path without
+leaking anything, or relaxes a bound no input reaches wastes the author's time
+just as surely as one the first unit test kills.
 
 Your inputs:
 
@@ -44,54 +45,43 @@ For each mutant, in order:
    function does: the callers up to the public API, what the early returns
    skip.
 
-2. **Decide whether it compiles.** If the mutant carries `compiles_ok`, that is
-   the compiler's answer, not a claim: the harness applied the patch and
-   syntax-checked the units that include the file. Take it, and spend nothing
-   more on the question - a `false` there makes the mutant `invalid`, and
-   `compile_error` says why. Where the field is absent no check was available,
-   so read for it instead: every name declared and in scope at its new
-   position, types still matching, every path still returning a value.
+2. **Decide whether it is worth reporting.** The harness compiles and runs the
+   test suites on every mutant itself, so do not judge whether it compiles or
+   whether a test kills it. Ask three questions instead, and answer each from
+   the code, not from the manifest's `severity_if_undetected`:
+   - **Consequence:** construct, concretely, an API call sequence and input
+     that reaches the mutated line and diverges, then say what a caller would
+     notice. A wrong return value, a wrong signature, key, or hash, an accepted
+     invalid input or rejected valid one, a crash or `ARG_CHECK` change, or a
+     new secret-dependent branch or memory access all count. If you cannot
+     construct one, ask why:
+     - is the line in a platform or `#if` branch this build does not compile;
+     - is it only in `VERIFY` code, so the shipped library is unchanged;
+     - is the value normalized, reduced, or overwritten before anyone reads it;
+     - is a magnitude or range bound that the mutant relaxes never reached;
+     - does an earlier `ARG_CHECK` or a later check already reject every input
+       the mutant would let through?
+     Any of those means it has no consequence, whatever the manifest claims. A
+     `constant-time` mutant has one even when every output is the same, unless
+     the data it branches on is public.
+   - **Plausibility:** would a developer write this? A copy-paste from a nearby
+     line, a flipped comparison, a wrong limb index or carry, or a dropped
+     normalize or clear are plausible. An edit that needs an odd constant or
+     would make a reviewer stop is not.
+   - **Testability:** could a deterministic test in `src/tests.c`,
+     `src/tests_exhaustive.c`, or `src/ctime_tests.c` catch it? Sketch the test
+     in one sentence. A divergence only on inputs no one can construct, such as
+     a hash preimage or a specific discrete log, fails this.
 
-3. **Decide whether it changes behaviour.** Construct, concretely, an API call
-   sequence and input that reaches the mutated line and diverges: what the
-   original returns or writes versus the mutant. If you cannot construct one,
-   ask why:
-   - is the line in a platform or `#if` branch this build does not compile;
-   - is it only in `VERIFY` code, so the shipped library is unchanged;
-   - is the value normalized, reduced, or overwritten before anyone reads it;
-   - is a magnitude or range bound that the mutant relaxes never reached;
-   - does an earlier `ARG_CHECK` or a later check already reject every input
-     the mutant would let through?
-   Any of those makes it equivalent in practice, whatever the manifest claims.
-   A `constant-time` mutant is not equivalent just because every output is the
-   same: a new secret-dependent branch or memory access is the behaviour
-   change. It is equivalent only if the data it branches on is public.
+3. **Judge.** Assign exactly one verdict:
+   - `good` - passes all three questions in step 2. Worth reporting.
+   - `noise` - fails at least one of them. Say which.
+   - `invalid` - the patch does not match what the manifest claims, or the diff
+     is empty or malformed.
 
-4. **Decide whether a test kills it.** This is where most of your budget goes,
-   and you must search for yourself rather than trust `kill_prediction`. grep
-   `src/tests.c`, `src/modules/*/tests_impl.h`, `src/tests_exhaustive.c`,
-   `src/modules/*/tests_exhaustive_impl.h`, the vectors in
-   `src/modules/*/vectors.h` and `src/wycheproof/`, and `src/ctime_tests.c` for
-   the functions, the API calls, and the behaviour the mutant changes.
-   Remember that `VERIFY_CHECK`s are live in the test binaries: a mutant that
-   breaks an invariant a `VERIFY_CHECK` downstream asserts is killed by any
-   test that reaches it. A constant-time mutant is killed only if
-   `ctime_tests.c` calls an API function that reaches it with secret data.
-   Name the test file and case you found.
-
-5. **Judge.** Assign exactly one verdict:
-   - `sneaky` - compiles, reachable, changes behaviour, and you could not find a
-     test that catches it. Worth running. This is the valuable outcome.
-   - `likely-killed` - real and valid, but you found the test that kills it.
-     Name it.
-   - `equivalent` - compiles, but no reachable input behaves differently.
-   - `invalid` - would not compile, the patch does not match what the manifest
-     claims, or the diff is empty or malformed.
-
-Being wrong in either direction costs the same. Do not call a mutant sneaky to
-be agreeable, and do not dismiss one as equivalent because tracing its
-reachability is tedious. Either way you must name the file and lines that
-settled it.
+Being wrong in either direction costs the same. Do not call a mutant good to
+be agreeable, and do not dismiss one as noise because tracing its consequence
+is tedious. Either way you must name the file and lines that settled it.
 
 ## Rules
 
@@ -105,6 +95,8 @@ settled it.
 - A mutant the harness already marked `"apply_ok": false` or
   `"compiles_ok": false` is `invalid`; say so in `verdict_reason` and move on
   without spending budget on it.
+- Ignore `kill_prediction` and `compile_confidence`; the harness settles both
+  by running the mutant.
 - If a mutant is marked `duplicate_of`, judge it on its merits but say in
   `verdict_reason` that it duplicates that id.
 
@@ -115,11 +107,9 @@ every entry in `mutants` gains exactly these fields:
 
 ```json
 {
-  "verdict": "sneaky | likely-killed | equivalent | invalid",
-  "compiles": true,
-  "reachable": true,
-  "killed_by": "test file and case that kills it, or 'none found'",
-  "verdict_reason": "2-4 sentences: the input you constructed, what diverges, and the tests you searched. Name the files and lines you read, especially when they are not the ones the mutant cited."
+  "verdict": "good | noise | invalid",
+  "suggested_test": "one sentence describing a test that would catch it, or null when the verdict is not good",
+  "verdict_reason": "2-4 sentences: the input you constructed, what diverges, what a caller would notice, and why it is or is not plausible and testable. Name the files and lines you read, especially when they are not the ones the mutant cited."
 }
 ```
 

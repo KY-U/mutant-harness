@@ -262,7 +262,7 @@ fi
 # Hand a finished run's patches to the verifier. Only the mutants that apply and
 # compile: the others would each burn a build to prove what the manifest already
 # says. A --structural run also leaves out its line-level mutants, which a
-# line-by-line tool tests far more cheaply. Verdicts from --review are *not* filtered on - a `noise` or `equivalent` call is
+# line-by-line tool tests far more cheaply. Verdicts from --review are *not* filtered on - a `noise` call is
 # still a model's opinion, and testing it is how you find out the model was
 # wrong. Either mode's exit code is ours; --export runs only when it succeeded.
 run_verification() {  # run_verification <out-dir> <container-name>
@@ -821,13 +821,13 @@ if [[ -s "$MANIFEST" ]] && command -v jq >/dev/null && jq empty "$MANIFEST" 2>/d
         "\([.mutants[]? | select(.line_level)] | length) line-level" +
         "\(if .harness.structural then " (not verified, --structural)" else "" end)",
       (if .review then
-         "review: \(.review.good // 0) good, \(.review.dead // 0) dead, \(.review.sneaky // 0) sneaky, \(.review.likely_killed // 0) likely-killed, " +
-         "\(.review.noise // 0) noise, \(.review.equivalent // 0) equivalent, \(.review.invalid // 0) invalid"
+         "review: \(.review.good // 0) good, \(.review.dead // 0) dead, " +
+         "\(.review.noise // 0) noise, \(.review.invalid // 0) invalid"
        else "review: not run" end),
       "",
       ((.mutants // []) | sort_by(
           [((.verdict // "good") as $v
-              | ["good","sneaky","likely-killed","noise","equivalent","dead","invalid"] | index($v) // 9),
+              | ["good","noise","dead","invalid"] | index($v) // 9),
            (.severity_if_undetected as $s
               | ["critical","high","medium","low"] | index($s) // 9)]
         )[] |

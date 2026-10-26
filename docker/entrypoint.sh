@@ -705,15 +705,12 @@ run_review_pass() {
                       duration_seconds: $elapsed,
                       good:          [.mutants[]? | select(.verdict == "good")]          | length,
                       dead:          [.mutants[]? | select(.verdict == "dead")]          | length,
-                      sneaky:        [.mutants[]? | select(.verdict == "sneaky")]        | length,
-                      likely_killed: [.mutants[]? | select(.verdict == "likely-killed")] | length,
                       noise:         [.mutants[]? | select(.verdict == "noise")]         | length,
-                      equivalent:    [.mutants[]? | select(.verdict == "equivalent")]    | length,
                       invalid:       [.mutants[]? | select(.verdict == "invalid")]       | length}}' \
        "$OUT_REVIEWED" > "$REVIEWED_FILE"
 
     log "wrote $REVIEWED_FILE ($(jq -r '.review
-          | "\(.good) good, \(.dead) dead, \(.sneaky) sneaky, \(.likely_killed) likely-killed, \(.noise) noise, \(.equivalent) equivalent, \(.invalid) invalid"' \
+          | "\(.good) good, \(.dead) dead, \(.noise) noise, \(.invalid) invalid"' \
           "$REVIEWED_FILE"))"
 }
 
