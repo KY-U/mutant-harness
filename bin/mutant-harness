@@ -341,7 +341,10 @@ command -v docker >/dev/null || die "docker not found on PATH"
 # ---------------------------------------------------------------- image ----
 build_image() {
     log "building $IMAGE (first build clones $TARGET_NAME and the BIPs, a few minutes)"
-    docker build -t "$IMAGE" \
+    # --rebuild is how a user gets a fresh clone, which a cached layer would hide.
+    local bust=()
+    [[ "$REBUILD" == 1 ]] && bust=(--build-arg "CLONE_CACHE_BUST=$(date +%s)")
+    docker build -t "$IMAGE" ${bust[@]+"${bust[@]}"} \
         --build-arg "TARGET_NAME=$TARGET_NAME" \
         --build-arg "REPO_URL=$REPO_URL" \
         --build-arg "CMAKE_FLAGS=$CMAKE_FLAGS" \

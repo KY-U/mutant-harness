@@ -41,9 +41,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN npm install -g @anthropic-ai/claude-code && npm cache clean --force
 
+# --rebuild sets this to a fresh value so the clones below are redone; otherwise
+# Docker reuses the cached layer and the "rebuilt" image keeps an old checkout.
+ARG CLONE_CACHE_BUST=""
+
 # The target's source, baked into the image so a run needs no network for the
 # repo. It lives at /src/bitcoin whatever the target is.
-RUN git clone --depth "${CLONE_DEPTH}" --branch "${REPO_REF}" "${REPO_URL}" /src/bitcoin \
+RUN echo "clone ${CLONE_CACHE_BUST}" >/dev/null \
+    && git clone --depth "${CLONE_DEPTH}" --branch "${REPO_REF}" "${REPO_URL}" /src/bitcoin \
     && git -C /src/bitcoin log -1 --format='%H %cI %s' > /src/bitcoin-commit.txt
 
 # The whole BIP repository. A mutant is only interesting where it breaks a rule
