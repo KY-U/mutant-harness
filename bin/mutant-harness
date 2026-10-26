@@ -79,7 +79,8 @@ Options:
                        classified from its diff (`line_level`), and line-level
                        mutants are not verified
   --out <dir>          Output root (default: ./results); results land in
-                       <dir>/<file-slug>-<timestamp>/
+                       <dir>/<file-slug>-<timestamp>/, or with --pr in
+                       <dir>/pr-<n>-<timestamp>/<file-slug>/ next to a summary.md
   --model <name>       Model for the mutator (default: opus)
   --review             Run the second-pass review of the mutants (default: off)
   --review-model <n>   Model for the review pass (default: same as --model)
@@ -467,6 +468,8 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
         case "$1" in
             --rebuild)                    shift ;;
             --workers)                    shift 2 ;;
+            # Each file's run dir is handed to it; where results go is no part of a cache key.
+            --out)                        shift 2 ;;
             --verify|--export)            ver_args+=("$1"); shift ;;
             --verify-repo|--verify-arg)   ver_args+=("$1" "$2"); shift 2 ;;
             --target|--repo|--docker-arg) gen_args+=("$1" "$2"); ver_args+=("$1" "$2"); shift 2 ;;
@@ -488,7 +491,7 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
     command -v jq >/dev/null && head="$(jq -r '.head.sha // empty' <<< "$pr_json")"
     cached_run() {  # cached_run <file> <key>: the newest earlier run dir made with that key
         local d found=""
-        for d in "$OUT_ROOT/$(slug_of "$1")"-*/; do
+        for d in "$OUT_ROOT/pr-$PR-"*/"$(slug_of "$1")"/; do
             d="${d%/}"
             [[ ! -L "$d" && -f "$d/cache-key" && "$(< "$d/cache-key")" == "$2" && -s "$d/out/mutants.json" ]] \
                 && found="$d"
@@ -498,6 +501,7 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
 
     # One stamp for every file, so each run dir is known here.
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    run_root="$OUT_ROOT/pr-$PR-$stamp"
     # What the harness itself brings to a run: the image, the scripts in it, the
     # prompts and the profile. A change to any of them must not reuse old mutants.
     harness_key="v$IMAGE_VERSION-$(cat "$HERE"/docker/{Dockerfile,entrypoint.sh,verify-entrypoint.sh,tu-check} \
@@ -508,9 +512,12 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
         keys+=("$key")
         prev="$(cached_run "$f" "$key")"
         if [[ -n "$prev" && -n "$head" ]]; then
-            log "=== $f: unchanged since $(basename "$prev"); reusing its mutants ==="
-            dir="$OUT_ROOT/$(slug_of "$f")-$stamp"
+            log "=== $f: unchanged since ${prev#"$OUT_ROOT"/}; reusing its mutants ==="
+            dir="$run_root/$(slug_of "$f")"
             mkdir -p "$dir/work" && cp -r "$prev/out" "$dir/" && rm -rf "$dir/out/verify"
+            # Name the run that generated them, not one that reused them too.
+            if [[ -f "$prev/reused-from" ]]; then cp "$prev/reused-from" "$dir/"
+            else printf '%s\n' "${prev#"$OUT_ROOT"/}" > "$dir/reused-from"; fi
             for j in mutants.json report.json; do
                 jq --arg c "$head" '.repo.commit = $c' "$dir/out/$j" > "$dir/out/$j.tmp" \
                     && mv "$dir/out/$j.tmp" "$dir/out/$j"
@@ -521,18 +528,18 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
         log "=== $f: generating ==="
         # Hand each run what was fetched above: one fetch per file would spend the
         # unauthenticated API's 60 requests an hour on a single PR.
-        work="$OUT_ROOT/$(slug_of "$f")-$stamp/work"
+        work="$run_root/$(slug_of "$f")/work"
         mkdir -p "$work" && printf '%s\n' "$diff" > "$work/pr.diff"
         [[ -n "$pr_json" ]] && printf '%s\n' "$pr_json" > "$work/pr.json"
         [[ -n "$pr_commits" ]] && printf '%s\n' "$pr_commits" > "$work/pr-commits.json"
-        MUTANT_HARNESS_STAMP="$stamp" "$0" "${gen_args[@]}" --file "$f" &
+        MUTANT_HARNESS_STAMP="$stamp" MUTANT_HARNESS_RUN_DIR="$run_root/$(slug_of "$f")" "$0" "${gen_args[@]}" --file "$f" &
         pids+=("$!")
     done
     failed=() generated=()
     for i in "${!files[@]}"; do
         if [[ "${pids[$i]}" == cached ]] || wait "${pids[$i]}"; then
             generated+=("${files[$i]}")
-            printf '%s\n' "${keys[$i]}" > "$OUT_ROOT/$(slug_of "${files[$i]}")-$stamp/cache-key"
+            printf '%s\n' "${keys[$i]}" > "$run_root/$(slug_of "${files[$i]}")/cache-key"
         else
             failed+=("${files[$i]}")
         fi
@@ -544,7 +551,7 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
         baseline=()
         while (( ${#queue[@]} )) && (( ${#baseline[@]} == 0 )); do
             f="${queue[0]}"; queue=("${queue[@]:1}")
-            dir="$OUT_ROOT/$(slug_of "$f")-$stamp"
+            dir="$run_root/$(slug_of "$f")"
             log "=== $f: verifying ==="
             "$0" "${ver_args[@]}" --verify-only "$dir" || { failed+=("$f"); continue; }
             # No verify dir means nothing was runnable, and no baseline ran.
@@ -578,7 +585,7 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
                     f="${queue[$i]}"
                     log "=== $f: verifying (worker $((w + 1))) ==="
                     MUTANT_HARNESS_BUILD_VOLUME="${vols[$w]}" "$0" "${ver_args[@]}" \
-                        ${baseline[@]+"${baseline[@]}"} --verify-only "$OUT_ROOT/$(slug_of "$f")-$stamp" \
+                        ${baseline[@]+"${baseline[@]}"} --verify-only "$run_root/$(slug_of "$f")" \
                         || printf '%s\n' "$f" >> "$claims/failed"
                 done
             ) &
@@ -587,6 +594,34 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
         (( ${#wpids[@]} )) && wait "${wpids[@]}"
         [[ -f "$claims/failed" ]] && mapfile -t -O "${#failed[@]}" failed < "$claims/failed"
         rm -rf "$claims"
+    fi
+    # One table for the whole PR, so no run has to be read from the interleaved log.
+    if command -v jq >/dev/null; then
+        {
+            printf '# pull request #%s\n\nhead: %s\nrun: %s\n' "$PR" "${head:-?}" "$stamp"
+            for f in "${files[@]}"; do
+                dir="$run_root/$(slug_of "$f")"
+                src="generated in this run"
+                [[ -f "$dir/reused-from" ]] && src="reused from $(< "$dir/reused-from")"
+                printf '\n## %s\n\n%s\n\n' "$f" "$src"
+                if [[ ! -s "$dir/out/mutants.json" ]]; then echo "no mutants.json: generation failed"; continue; fi
+                results=/dev/null
+                [[ -s "$dir/out/verify/results.jsonl" ]] && results="$dir/out/verify/results.jsonl"
+                jq -r --slurpfile r "$results" '
+                    if (.mutants // []) == [] then "no mutants" else
+                    "| mutant | severity | result | time | title |",
+                    "|---|---|---|---|---|",
+                    (.mutants[] | .id as $id | ([$r[] | select(.id == $id)] | last) as $v |
+                        "| \(.id) | \(.severity_if_undetected // "?") | " +
+                        (if $v then $v.status + (if $v.killed_tests then " (\($v.killed_by): \($v.killed_tests | join(", ")))" else "" end)
+                         elif .apply_ok == false then "does not apply"
+                         elif .compiles == false then "does not compile"
+                         else "not verified" end) +
+                        " | \(if $v.seconds then "\($v.seconds)s" else "" end) | \(.title | gsub("\\|"; "\\|")) |")
+                    end' "$dir/out/mutants.json"
+            done
+        } > "$run_root/summary.md"
+        log "summary: $run_root/summary.md"
     fi
     (( ${#failed[@]} == 0 )) || die "failed: ${failed[*]}"
     log "all ${#files[@]} file(s) of pull request #$PR done"
@@ -611,7 +646,7 @@ SLUG="$(slug_of "$TARGET_FILE")"
 
 # ------------------------------------------------------------- run dir ----
 STAMP="${MUTANT_HARNESS_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
-RUN_DIR="$OUT_ROOT/$SLUG-$STAMP"
+RUN_DIR="${MUTANT_HARNESS_RUN_DIR:-$OUT_ROOT/$SLUG-$STAMP}"
 WORK_DIR="$RUN_DIR/work"
 OUT_DIR="$RUN_DIR/out"
 mkdir -p "$WORK_DIR" "$OUT_DIR/patches"
@@ -717,7 +752,7 @@ SUMMARY_SRC="$MANIFEST"
     && jq empty "$REVIEWED" 2>/dev/null && SUMMARY_SRC="$REVIEWED"
 
 if [[ -s "$MANIFEST" ]] && command -v jq >/dev/null && jq empty "$MANIFEST" 2>/dev/null; then
-    ln -sfn "$(cd "$RUN_DIR" && pwd)" "$OUT_ROOT/$SLUG-latest"
+    [[ -n "${MUTANT_HARNESS_RUN_DIR:-}" ]] || ln -sfn "$(cd "$RUN_DIR" && pwd)" "$OUT_ROOT/$SLUG-latest"
     echo
     jq -r '
       "target: \(.target.file // "?")  (\(.target.lines // "whole file"))",
