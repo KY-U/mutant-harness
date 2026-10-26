@@ -775,7 +775,8 @@ if [[ -s "$MANIFEST" ]] && command -v jq >/dev/null && jq empty "$MANIFEST" 2>/d
         "  \(.id) [\(.severity_if_undetected // "?")]" +
         "\(if .verdict then " [\(.verdict)]" else "" end)" +
         "\(if .line_level then " [line-level]" else "" end) " +
-        "\(.operator // "?") @\(.location.lines // "?"): \(.title)"),
+        "\(.operator // "?") @\(.location.lines // "?"): \(.title)" +
+        "\(if .apply_ok == false then "\n      does not apply: \(.apply_error // "?" | split("\n")[0])" else "" end)"),
       "",
       "summary: \(.summary // "")"
     ' "$SUMMARY_SRC"
