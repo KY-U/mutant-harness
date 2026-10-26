@@ -444,6 +444,11 @@ if [[ -n "$REVIEW_ONLY_DIR" ]]; then
     REVIEW_ONLY_COMMIT="$(jq -r '.repo.commit // empty' "$RUN_DIR/out/mutants.json")"
     [[ -n "$TARGET_FILE" && -n "$REVIEW_ONLY_COMMIT" ]] \
         || die "$RUN_DIR/out/mutants.json names no target file or commit"
+    # Nothing to review is not worth a container and a fetch.
+    if [[ "$(jq '.mutants | length' "$RUN_DIR/out/mutants.json")" == 0 ]]; then
+        log "$TARGET_FILE: no mutants to review"
+        exit 0
+    fi
     REVIEW=1
     # The run below then uses this run dir instead of starting a new one.
     MUTANT_HARNESS_RUN_DIR="$RUN_DIR"
@@ -462,7 +467,8 @@ review_args() {
             *) shift ;;
         esac
     done
-    printf '%s\0' ${out[@]+"${out[@]}"}
+    (( ${#out[@]} )) || return 0
+    printf '%s\0' "${out[@]}"
 }
 
 # -------------------------------------------------------------- pr files ----
