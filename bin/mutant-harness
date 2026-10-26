@@ -84,7 +84,8 @@ Options:
                        <dir>/<file-slug>-<timestamp>/, or with --pr in
                        <dir>/pr-<n>-<timestamp>/<file-slug>/ next to a summary.md
   --model <name>       Model for the mutator (default: opus)
-  --review             Run the second-pass review of the mutants (default: off)
+  --review             Run the second-pass review of the mutants (default: off).
+                       With verification it runs after it, on the survivors.
   --review-model <n>   Model for the review pass (default: same as --model)
   --review-only <dir>  Review an existing run directory's mutants and exit: no
                        generation, no verification. A --pr run's directory
@@ -450,6 +451,20 @@ fi
 
 slug_of() { printf '%s' "$1" | tr '/.' '--' | sed 's/^-*//'; }
 
+# Reviewed after verification, a run skips the mutants the tests killed. These
+# are the arguments of ours that the later --review-only still needs.
+review_args() {
+    local out=()
+    set -- "${ORIG_ARGS[@]}"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --model|--review-model|--target|--repo|--bips-repo|--docker-arg) out+=("$1" "$2"); shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    printf '%s\0' ${out[@]+"${out[@]}"}
+}
+
 # -------------------------------------------------------------- pr files ----
 # --pr without --file mutates every source file the PR adds lines to, one run
 # (and run dir) each, by re-running ourselves with --file. Tests and benchmarks
@@ -524,6 +539,7 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
             # Each file's run dir is handed to it; where results go is no part of a cache key.
             --out)                        shift 2 ;;
             --verify|--export)            ver_args+=("$1"); shift ;;
+            --review)                     [[ "$VERIFY" == 1 ]] || gen_args+=("$1"); shift ;;
             --verify-repo|--verify-arg)   ver_args+=("$1" "$2"); shift 2 ;;
             --target|--repo|--docker-arg) gen_args+=("$1" "$2"); ver_args+=("$1" "$2"); shift 2 ;;
             *)                            gen_args+=("$1"); shift ;;
@@ -647,6 +663,11 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
         (( ${#wpids[@]} )) && wait "${wpids[@]}"
         [[ -f "$claims/failed" ]] && mapfile -t -O "${#failed[@]}" failed < "$claims/failed"
         rm -rf "$claims"
+        if [[ "$REVIEW" == 1 ]]; then
+            log "=== reviewing the mutants that survived ==="
+            mapfile -d '' rev < <(review_args)
+            "$0" ${rev[@]+"${rev[@]}"} --review-only "$run_root" || failed+=("review")
+        fi
     fi
     # One table for the whole PR, so no run has to be read from the interleaved log.
     if command -v jq >/dev/null; then
@@ -703,6 +724,12 @@ RUN_DIR="${MUTANT_HARNESS_RUN_DIR:-$OUT_ROOT/$SLUG-$STAMP}"
 WORK_DIR="$RUN_DIR/work"
 OUT_DIR="$RUN_DIR/out"
 mkdir -p "$WORK_DIR" "$OUT_DIR/patches"
+
+# With verification the review waits for it; see review_args.
+REVIEW_AFTER_VERIFY=0
+if [[ "$REVIEW" == 1 && "$VERIFY" == 1 && -z "$REVIEW_ONLY_COMMIT" ]]; then
+    REVIEW=0 REVIEW_AFTER_VERIFY=1
+fi
 
 # A review-only run keeps the prompt the mutants were generated with.
 [[ -n "$REVIEW_ONLY_COMMIT" ]] || cp "$HERE/prompts/$TARGET_NAME/mutate.md" "$WORK_DIR/prompt.md"
@@ -854,6 +881,13 @@ if [[ -s "$MANIFEST" ]] && command -v jq >/dev/null && jq empty "$MANIFEST" 2>/d
     [[ "$VERIFY" == 1 ]] \
         || log "verify all:       mutant-harness --verify-only $RUN_DIR"
 
+    if [[ "$REVIEW_AFTER_VERIFY" == 1 ]]; then
+        # run_verification exits; the subshell keeps that from ending us too.
+        ( run_verification "$OUT_DIR" "$CONTAINER-verify" ); rc=$?
+        mapfile -d '' rev < <(review_args)
+        "$0" ${rev[@]+"${rev[@]}"} --review-only "$RUN_DIR" || rc=$(( rc ? rc : 1 ))
+        exit "$rc"
+    fi
     [[ "$VERIFY" == 1 ]] && run_verification "$OUT_DIR" "$CONTAINER-verify"
     exit 0
 fi
