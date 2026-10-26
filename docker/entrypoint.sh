@@ -32,11 +32,13 @@ PR="${PR:-}"
 UPDATE_BIPS="${UPDATE_BIPS:-0}"
 TARGET_NAME="${TARGET_NAME:-core}"
 CMAKE_FLAGS="${CMAKE_FLAGS:-}"
+# Set by --review-only: review the mutants already in $OUT_DIR, cut against this commit.
+REVIEW_ONLY_COMMIT="${REVIEW_ONLY_COMMIT:-}"
 
 log() { printf '[harness] %s\n' "$*" >&2; }
 die() { printf '[harness] error: %s\n' "$*" >&2; exit 1; }
 
-[[ -r "$PROMPT_TEMPLATE" ]] || die "prompt not readable at $PROMPT_TEMPLATE"
+[[ -n "$REVIEW_ONLY_COMMIT" || -r "$PROMPT_TEMPLATE" ]] || die "prompt not readable at $PROMPT_TEMPLATE"
 [[ -d "$BITCOIN_SRC/.git" ]] || die "no $TARGET_NAME clone at $BITCOIN_SRC"
 [[ -d "$BIPS_SRC/.git" ]] || die "no bitcoin/bips clone at $BIPS_SRC"
 
@@ -69,6 +71,15 @@ if [[ -n "$PR" ]]; then
     [[ -s /work/pr.diff ]] || curl -fsSL --retry 3 -H "Accept: application/vnd.github.v3.diff" \
         "https://api.github.com/repos/${REPO_PATH}/pulls/$PR" -o /work/pr.diff \
         || die "cannot download the diff of pull request #$PR"
+fi
+
+# The reviewer reads the file and greps the tests, so it needs the tree the
+# mutants were cut against, which an earlier run fetched in another container.
+if [[ -n "$REVIEW_ONLY_COMMIT" && "$(git -C "$BITCOIN_SRC" rev-parse HEAD)" != "$REVIEW_ONLY_COMMIT" ]]; then
+    log "fetching $REVIEW_ONLY_COMMIT, the commit the mutants were cut against..."
+    git -C "$BITCOIN_SRC" fetch --depth 1 origin "$REVIEW_ONLY_COMMIT" \
+        && git -C "$BITCOIN_SRC" reset --hard FETCH_HEAD \
+        || die "cannot put the tree at $REVIEW_ONLY_COMMIT"
 fi
 
 if [[ "$UPDATE_BIPS" == "1" ]]; then
@@ -316,7 +327,8 @@ setup_compile_check() {
     COMPILE_CHECK=1
     log "compile check on: one translation unit, $BITCOIN_BUILD"
 }
-setup_compile_check
+# A review writes no patches, so it has nothing to compile.
+[[ -n "$REVIEW_ONLY_COMMIT" ]] || setup_compile_check
 
 if [[ "$COMPILE_CHECK" == "1" ]]; then
     COMPILE_TEXT="Do not build the tree: a full build would consume your budget. You
@@ -669,16 +681,29 @@ run_review_pass() {
        --argjson elapsed "$elapsed" \
        '. + {review: {model: $model, finished_at: $ts,
                       duration_seconds: $elapsed,
+                      good:          [.mutants[]? | select(.verdict == "good")]          | length,
                       sneaky:        [.mutants[]? | select(.verdict == "sneaky")]        | length,
                       likely_killed: [.mutants[]? | select(.verdict == "likely-killed")] | length,
+                      noise:         [.mutants[]? | select(.verdict == "noise")]         | length,
                       equivalent:    [.mutants[]? | select(.verdict == "equivalent")]    | length,
                       invalid:       [.mutants[]? | select(.verdict == "invalid")]       | length}}' \
        "$OUT_REVIEWED" > "$REVIEWED_FILE"
 
     log "wrote $REVIEWED_FILE ($(jq -r '.review
-          | "\(.sneaky) sneaky, \(.likely_killed) likely-killed, \(.equivalent) equivalent, \(.invalid) invalid"' \
+          | "\(.good) good, \(.sneaky) sneaky, \(.likely_killed) likely-killed, \(.noise) noise, \(.equivalent) equivalent, \(.invalid) invalid"' \
           "$REVIEWED_FILE"))"
 }
+
+# --------------------------------------------------------- review only ----
+# The mutants and patches already exist; only the second pass runs, on the
+# manifest as generation left it.
+if [[ -n "$REVIEW_ONLY_COMMIT" ]]; then
+    [[ -s "$MANIFEST_FILE" ]] && jq empty "$MANIFEST_FILE" 2>/dev/null \
+        || die "no valid $MANIFEST_FILE to review"
+    REVIEW=1
+    run_review_pass "$(jq '(.mutants // []) | length' "$MANIFEST_FILE")"
+    exit 0
+fi
 
 # ------------------------------------------------------------- mutate ----
 PROMPT_RENDERED=/work/prompt.rendered.md

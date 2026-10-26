@@ -28,6 +28,8 @@ VERIFY_CONTAINER=0
 VERIFY_REPO=""
 VERIFY_ARGS=()
 VERIFY_ONLY_DIR=""
+REVIEW_ONLY_DIR=""
+REVIEW_ONLY_COMMIT=""
 EXPORT=0
 REBUILD=0
 UPDATE_CORE=0
@@ -84,6 +86,9 @@ Options:
   --model <name>       Model for the mutator (default: opus)
   --review             Run the second-pass review of the mutants (default: off)
   --review-model <n>   Model for the review pass (default: same as --model)
+  --review-only <dir>  Review an existing run directory's mutants and exit: no
+                       generation, no verification. A --pr run's directory
+                       reviews each of its files at once.
   --fallback-model <n> Fallback when the primary is overloaded
   --repo <path>        Mount a host clone of the target instead of the baked-in one
   --bips-repo <path>   Mount a host bitcoin/bips clone instead of the baked-in one
@@ -141,6 +146,7 @@ while [[ $# -gt 0 ]]; do
         --model)          MODEL="${2:?}"; shift 2 ;;
         --review)         REVIEW=1; shift ;;
         --review-model)   REVIEW_MODEL="${2:?}"; shift 2 ;;
+        --review-only)    REVIEW_ONLY_DIR="${2:?}"; shift 2 ;;
         --fallback-model) FALLBACK_MODEL="${2:?}"; shift 2 ;;
         --repo)           REPO_MOUNT="${2:?}"; shift 2 ;;
         --bips-repo)      BIPS_REPO_MOUNT="${2:?}"; shift 2 ;;
@@ -164,12 +170,14 @@ while [[ $# -gt 0 ]]; do
         *)                die "unknown option: $1 (try --help)" ;;
     esac
 done
+# The run directory --verify-only or --review-only works on.
+ONLY_DIR="${VERIFY_ONLY_DIR:-$REVIEW_ONLY_DIR}"
 
 # Prefix every line with the file being run
 if [[ -z "${MUTANT_HARNESS_PREFIXED:-}" && "$SHELL_MODE" == 0 && "$DETACH" == 0 && -z "$APPLY_PATCH" ]]; then
     prefix_file="$TARGET_FILE"
-    if [[ -z "$prefix_file" && -n "$VERIFY_ONLY_DIR" ]] && command -v jq >/dev/null; then
-        for m in "$VERIFY_ONLY_DIR/out/mutants.json" "$VERIFY_ONLY_DIR/mutants.json"; do
+    if [[ -z "$prefix_file" && -n "$ONLY_DIR" ]] && command -v jq >/dev/null; then
+        for m in "$ONLY_DIR/out/mutants.json" "$ONLY_DIR/mutants.json"; do
             [[ -f "$m" ]] || continue
             prefix_file="$(jq -r '.target.file // empty' "$m" 2>/dev/null || true)"
             break
@@ -203,12 +211,12 @@ fi
 VERIFY_ARGS=(--stages "$VERIFY_STAGES" ${VERIFY_ARGS[@]+"${VERIFY_ARGS[@]}"})
 # A run can only be verified in the image of the target it was cut from; say so
 # before building or starting the wrong one.
-if [[ -n "$VERIFY_ONLY_DIR" ]] && command -v jq >/dev/null; then
-    for m in "$VERIFY_ONLY_DIR/out/mutants.json" "$VERIFY_ONLY_DIR/mutants.json"; do
+if [[ -n "$ONLY_DIR" ]] && command -v jq >/dev/null; then
+    for m in "$ONLY_DIR/out/mutants.json" "$ONLY_DIR/mutants.json"; do
         [[ -f "$m" ]] || continue
         made_for="$(jq -r '.harness.target // "core"' "$m" 2>/dev/null || true)"
         [[ -z "$made_for" || "$made_for" == "$TARGET_NAME" ]] \
-            || die "$VERIFY_ONLY_DIR was generated with --target $made_for; pass --target $made_for"
+            || die "$ONLY_DIR was generated with --target $made_for; pass --target $made_for"
         break
     done
 fi
@@ -254,7 +262,7 @@ fi
 # Hand a finished run's patches to the verifier. Only the mutants that apply and
 # compile: the others would each burn a build to prove what the manifest already
 # says. A --structural run also leaves out its line-level mutants, which a
-# line-by-line tool tests far more cheaply. Verdicts from --review are *not* filtered on - an `equivalent` call is
+# line-by-line tool tests far more cheaply. Verdicts from --review are *not* filtered on - a `noise` or `equivalent` call is
 # still a model's opinion, and testing it is how you find out the model was
 # wrong. Either mode's exit code is ours; --export runs only when it succeeded.
 run_verification() {  # run_verification <out-dir> <container-name>
@@ -354,7 +362,7 @@ build_image() {
 }
 
 # What this harness needs the image to contain. Bumped in the Dockerfile too.
-IMAGE_VERSION=11
+IMAGE_VERSION=12
 
 image_label() {
     docker image inspect "$IMAGE" --format "{{index .Config.Labels \"$1\"}}" 2>/dev/null
@@ -396,6 +404,48 @@ if [[ -n "$VERIFY_ONLY_DIR" ]]; then
     log "verify only: $VERIFY_OUT"
     trap report_time EXIT
     run_verification "$VERIFY_OUT" "mutant-harness-verify-$(basename "$RUN_DIR")"
+fi
+
+# ------------------------------------------------------------ review only ----
+# Reviewing an existing run runs the second pass alone, on the mutants and
+# patches already there, against the commit they were cut from. That is how to
+# judge the review against verdicts you already have for the same mutants. A
+# --pr run's directory holds one run per file; each is reviewed, all at once.
+if [[ -n "$REVIEW_ONLY_DIR" ]]; then
+    [[ -z "$TARGET_FILE$PR$VERIFY_ONLY_DIR" ]] || die "--review-only takes no --file, --pr or --verify-only"
+    [[ -d "$REVIEW_ONLY_DIR" ]] || die "--review-only $REVIEW_ONLY_DIR is not a directory"
+    RUN_DIR="$(cd "$REVIEW_ONLY_DIR" && pwd)"
+    if [[ ! -f "$RUN_DIR/out/mutants.json" ]]; then
+        subs=("$RUN_DIR"/*/out/mutants.json)
+        [[ -f "${subs[0]}" ]] || die "no mutants.json under $RUN_DIR (pass a run directory from results/)"
+        trap report_time EXIT
+        pass=()
+        set -- "${ORIG_ARGS[@]}"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --rebuild)     shift ;;
+                --review-only) shift 2 ;;
+                *)             pass+=("$1"); shift ;;
+            esac
+        done
+        pids=() failed=()
+        for m in "${subs[@]}"; do
+            "$0" ${pass[@]+"${pass[@]}"} --review-only "${m%/out/mutants.json}" &
+            pids+=("$!")
+        done
+        for i in "${!subs[@]}"; do
+            wait "${pids[$i]}" || failed+=("${subs[$i]%/out/mutants.json}")
+        done
+        (( ${#failed[@]} == 0 )) || die "failed: ${failed[*]}"
+        exit 0
+    fi
+    TARGET_FILE="$(jq -r '.target.file // empty' "$RUN_DIR/out/mutants.json")"
+    REVIEW_ONLY_COMMIT="$(jq -r '.repo.commit // empty' "$RUN_DIR/out/mutants.json")"
+    [[ -n "$TARGET_FILE" && -n "$REVIEW_ONLY_COMMIT" ]] \
+        || die "$RUN_DIR/out/mutants.json names no target file or commit"
+    REVIEW=1
+    # The run below then uses this run dir instead of starting a new one.
+    MUTANT_HARNESS_RUN_DIR="$RUN_DIR"
 fi
 
 slug_of() { printf '%s' "$1" | tr '/.' '--' | sed 's/^-*//'; }
@@ -654,7 +704,8 @@ WORK_DIR="$RUN_DIR/work"
 OUT_DIR="$RUN_DIR/out"
 mkdir -p "$WORK_DIR" "$OUT_DIR/patches"
 
-cp "$HERE/prompts/$TARGET_NAME/mutate.md" "$WORK_DIR/prompt.md"
+# A review-only run keeps the prompt the mutants were generated with.
+[[ -n "$REVIEW_ONLY_COMMIT" ]] || cp "$HERE/prompts/$TARGET_NAME/mutate.md" "$WORK_DIR/prompt.md"
 cp "$HERE/prompts/$TARGET_NAME/review.md" "$WORK_DIR/review.md"
 
 # ------------------------------------------------------------------ auth ----
@@ -694,6 +745,7 @@ DOCKER_ARGS=(
     -e "PATCH_DIR=/out/patches"
     -e "REVIEW=$REVIEW"
     -e "REVIEW_MODEL=$REVIEW_MODEL"
+    -e "REVIEW_ONLY_COMMIT=$REVIEW_ONLY_COMMIT"
     -e "OUT_DIR=/out"
     -e "MODEL=$MODEL"
     -e "FALLBACK_MODEL=$FALLBACK_MODEL"
@@ -731,7 +783,11 @@ fi
 
 log "run dir: $RUN_DIR"
 trap report_time EXIT
-log "mutating $TARGET_FILE (target $COUNT mutants, model=$MODEL) ..."
+if [[ -n "$REVIEW_ONLY_COMMIT" ]]; then
+    log "reviewing the mutants of $TARGET_FILE (model=${REVIEW_MODEL:-$MODEL}) ..."
+else
+    log "mutating $TARGET_FILE (target $COUNT mutants, model=$MODEL) ..."
+fi
 
 set +e
 if [[ -n "$TIMEOUT" ]]; then
@@ -765,13 +821,13 @@ if [[ -s "$MANIFEST" ]] && command -v jq >/dev/null && jq empty "$MANIFEST" 2>/d
         "\([.mutants[]? | select(.line_level)] | length) line-level" +
         "\(if .harness.structural then " (not verified, --structural)" else "" end)",
       (if .review then
-         "review: \(.review.sneaky // 0) sneaky, \(.review.likely_killed // 0) likely-killed, " +
-         "\(.review.equivalent // 0) equivalent, \(.review.invalid // 0) invalid"
+         "review: \(.review.good // 0) good, \(.review.sneaky // 0) sneaky, \(.review.likely_killed // 0) likely-killed, " +
+         "\(.review.noise // 0) noise, \(.review.equivalent // 0) equivalent, \(.review.invalid // 0) invalid"
        else "review: not run" end),
       "",
       ((.mutants // []) | sort_by(
-          [((.verdict // "sneaky") as $v
-              | ["sneaky","likely-killed","equivalent","invalid"] | index($v) // 9),
+          [((.verdict // "good") as $v
+              | ["good","sneaky","likely-killed","noise","equivalent","invalid"] | index($v) // 9),
            (.severity_if_undetected as $s
               | ["critical","high","medium","low"] | index($s) // 9)]
         )[] |

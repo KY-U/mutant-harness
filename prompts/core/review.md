@@ -1,15 +1,17 @@
-# Task: decide which of these mutants are worth running
+# Task: decide which of these mutants are worth reporting
 
 Another agent planted mutants in a Bitcoin Core file and claims each one is a
 plausible bug that the test suite would miss. Their manifest is in
 `$IN_MUTANTS` and their patches are in `$PATCH_DIR`. You did not generate them
 and you owe their author nothing. Your only job is to decide, mutant by mutant,
-whether it is worth the machine time to compile and test.
+whether it is worth telling the author of the code about it.
 
-Running a mutant is expensive: a full Core build plus a test run each. An equivalent
-mutant burns that for a guaranteed non-result, a mutant that does not compile
-burns it for nothing at all, and a mutant the first unit test kills teaches
-nobody anything. Your verdicts are what decides where that budget goes.
+A surviving mutant is only worth reporting when it points at a test the author
+should write: a bug a developer could really make, with a consequence someone
+would notice, that a test could reliably catch. A mutant no test catches is not
+enough on its own. One that only resizes a cache, rewords a log line, or opens a
+race no test can hit wastes the author's time just as surely as one the first
+unit test kills.
 
 Your inputs:
 
@@ -35,46 +37,35 @@ For each mutant, in order:
    surrounding code in `$BITCOIN_SRC` with enough context to know what the
    function does: the enclosing scope, the callers, what the early returns skip.
 
-2. **Decide whether it compiles.** This is the cheapest way to disqualify one.
-   If the mutant carries `compiles_ok`, that is the compiler's answer, not a
-   claim: the harness applied the patch and syntax-checked the translation unit.
-   Take it, and spend nothing more on the question - a `false` there makes the
-   mutant `invalid`, and `compile_error` says why.
-   Where the field is absent no check was available, so read for it instead:
-   every name the mutated code uses declared and in scope at its new position,
-   types still matching, every path still returning a value, nothing used after
-   a `std::move` the relocation introduced, no relocated statement escaping the
-   lifetime of what it references, lock annotations not obviously violated.
+2. **Decide whether it is worth reporting.** The harness compiles and runs the
+   test suite on every mutant itself, so do not judge whether it compiles or
+   whether a test kills it. Ask three questions instead, and answer each from
+   the code, not from the manifest's `severity_if_undetected`:
+   - **Consequence:** construct, concretely, an input that reaches the mutated
+     line and diverges, then say what a user or caller would notice. A wrong
+     RPC result or error, a crash or assert, corrupt or stale on-disk data, a
+     consensus or policy change, a privacy leak, memory beyond a configured
+     limit, or a regression on the default configuration all count.
+     Performance under a non-default flag, cache sizing within the limits, and
+     log or help text do not. If no input diverges, it has no consequence.
+   - **Plausibility:** would a developer write this? A copy-paste from a nearby
+     line, `break` for `continue`, a flipped comparison, or a dropped call are
+     plausible. An edit that needs an odd constant or would make a reviewer stop
+     is not.
+   - **Testability:** could a deterministic unit or functional test catch it?
+     Sketch the test in one sentence. A race that needs precise thread timing,
+     a value no code path exposes, or a state that only mainnet reaches and no
+     test can build, fails this.
 
-3. **Decide whether it changes behaviour.** Construct, concretely, an input that
-   reaches the mutated line and diverges: which message, transaction, block,
-   script, or RPC call, and what the original does with it versus the mutant. If
-   you cannot construct one, ask why: is the mutated line unreachable, is the
-   changed value never read, does a later check already reject everything the
-   mutant would let through, does an assert make the state impossible? Any of
-   those makes it equivalent in practice, whatever the manifest claims.
+3. **Judge.** Assign exactly one verdict:
+   - `good` - passes all three questions in step 2. Worth reporting.
+   - `noise` - fails at least one of them. Say which.
+   - `invalid` - the patch does not match what the manifest claims, or the diff
+     is empty or malformed.
 
-4. **Decide whether a test kills it.** This is where most of your budget goes,
-   and you must search for yourself rather than trust `kill_prediction`. Grep
-   `src/test/`, `src/test/fuzz/`, and `test/functional/` for the function names,
-   the constants, the error strings, and the behaviour the mutant changes. A
-   fuzz target that reaches the line with an assert on the invariant kills it. A
-   functional test that asserts the exact reject reason kills a mutant that
-   changes which error is returned. Name the test file and case you found.
-
-5. **Judge.** Assign exactly one verdict:
-   - `sneaky` - compiles, reachable, changes behaviour, and you could not find a
-     test that catches it. Worth running. This is the valuable outcome.
-   - `likely-killed` - real and valid, but you found the test that kills it.
-     Name it.
-   - `equivalent` - compiles, but no reachable input behaves differently.
-   - `invalid` - would not compile, the patch does not match what the manifest
-     claims, or the diff is empty or malformed.
-
-Being wrong in either direction costs the same. Do not call a mutant sneaky to
-be agreeable, and do not dismiss one as equivalent because tracing its
-reachability is tedious. Either way you must name the file and lines that
-settled it.
+Being wrong in either direction costs the same. Do not call a mutant good to
+be agreeable, and do not dismiss one as noise because tracing its consequence
+is tedious. Either way you must name the file and lines that settled it.
 
 ## Rules
 
@@ -87,6 +78,8 @@ settled it.
 - A mutant the harness already marked `"apply_ok": false` or
   `"compiles_ok": false` is `invalid`; say so in `verdict_reason` and move on
   without spending budget on it.
+- Ignore `kill_prediction` and `compile_confidence`; the harness settles both
+  by running the mutant.
 - If a mutant is marked `duplicate_of`, judge it on its merits but say in
   `verdict_reason` that it duplicates that id.
 
@@ -97,11 +90,9 @@ every entry in `mutants` gains exactly these fields:
 
 ```json
 {
-  "verdict": "sneaky | likely-killed | equivalent | invalid",
-  "compiles": true,
-  "reachable": true,
-  "killed_by": "test file and case that kills it, or 'none found'",
-  "verdict_reason": "2-4 sentences: the input you constructed, what diverges, and the tests you searched. Name the files and lines you read, especially when they are not the ones the mutant cited."
+  "verdict": "good | noise | invalid",
+  "suggested_test": "one sentence describing a test that would catch it, or null when the verdict is not good",
+  "verdict_reason": "2-4 sentences: the input you constructed, what diverges, what a user would notice, and why it is or is not plausible and testable. Name the files and lines you read, especially when they are not the ones the mutant cited."
 }
 ```
 
