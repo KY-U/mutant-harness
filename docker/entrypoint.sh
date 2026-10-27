@@ -540,11 +540,25 @@ for m in mutants:
         m["apply_ok"] = False
         m["apply_error"] = "changes lines the pull request did not add"
 
-    # Two mutants with byte-identical bodies are one mutant. Hash only the +/-
-    # lines so differing hunk headers do not hide a duplicate.
-    changed = [l for l in patch_lines
-               if (l.startswith(("+", "-")) and not l.startswith(("+++", "---")))]
-    body = "".join(changed)
+    # Two mutants making the same change at the same place are one mutant. Hash
+    # each +/- line with the old-file line it sits at, so differing hunk headers
+    # or context do not hide a duplicate, and the same edit to two copies of a
+    # line (one per chain in chainparams.cpp) is not taken for one.
+    changed, keyed, old, in_hunk = [], [], 0, False
+    for l in patch_lines:
+        h = re.match(r"@@ -(\d+)", l)
+        if h:
+            old, in_hunk = int(h.group(1)), True
+        elif not in_hunk or l.startswith(("+++", "---")):
+            continue
+        elif l.startswith(("+", "-")):
+            changed.append(l)
+            keyed.append(f"{old}:{l}")
+            if l.startswith("-"):
+                old += 1
+        elif l.startswith(" "):
+            old += 1
+    body = "".join(keyed)
     digest = hashlib.sha256(body.encode()).hexdigest()
     m["line_level"] = line_level([l[1:] for l in changed if l[0] == "-"],
                                  [l[1:] for l in changed if l[0] == "+"])
