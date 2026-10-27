@@ -47,7 +47,66 @@ warn() { printf '\033[33m[mutant-harness]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[31m[mutant-harness]\033[0m %s\n' "$*" >&2; exit 1; }
 # Wall time since the script started, image build included. Trapped on EXIT
 # once a run starts, so every way out of it reports.
-report_time() { log "finished in $((SECONDS / 60))m$((SECONDS % 60))s"; }
+report_time() {
+    local rc=$?
+    log "finished in $((SECONDS / 60))m$((SECONDS % 60))s"
+    if [[ -n "${SUMMARY_FILE:-}" ]]; then write_summary "$rc"; fi
+}
+STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+cost_of() {  # cost_of <stream>: what the agent of one stream-json log cost, in USD
+    [[ -s "$1" ]] || { echo 0; return; }
+    jq -n '[inputs | select(.type == "result") | .total_cost_usd // 0] | add // 0' "$1" 2>/dev/null || echo 0
+}
+
+# One JSON for the whole run (SUMMARY_DIRS, written to SUMMARY_FILE): wall time,
+# what the agents cost and where every mutant ended up. A reused file's
+# generation was paid for by the run it came from, so it costs nothing here.
+write_summary() {  # write_summary <exit-code>
+    command -v jq >/dev/null || return 0
+    local d m r v gen rev
+    for d in "${SUMMARY_DIRS[@]}"; do
+        m="$d/out/mutants.json";          [[ -s "$m" ]] || m=/dev/null
+        r="$d/out/verify/results.jsonl";  [[ -s "$r" ]] || r=/dev/null
+        v="$d/out/mutants-reviewed.json"; [[ -s "$v" ]] || v=/dev/null
+        gen=0; [[ -f "$d/reused-from" ]] || gen="$(cost_of "$d/out/session.stream.jsonl")"
+        rev="$(cost_of "$d/out/review.stream.jsonl")"
+        jq -n --arg dir "$d" --arg reused "$(cat "$d/reused-from" 2>/dev/null)" \
+            --argjson gen "$gen" --argjson rev "$rev" \
+            --slurpfile m "$m" --slurpfile r "$r" --slurpfile v "$v" '
+            ($m[0].mutants // []) as $ms
+            | {file: ($m[0].target.file // ($dir | split("/") | last)),
+               run_dir: $dir,
+               commit: $m[0].repo.commit,
+               reused_from: (if $reused == "" then null else $reused end),
+               cost_usd: {generation: $gen, review: $rev},
+               mutants: {
+                 generated:      ($ms | length),
+                 apply_failed:   [$ms[] | select(.apply_ok == false)] | length,
+                 compile_failed: [$ms[] | select(.compiles_ok == false)] | length,
+                 verify: (reduce ($ms[] | .id as $id | [$r[] | select(.id == $id)] | last
+                                  | .status // "not-verified") as $s ({}; .[$s] += 1)),
+                 review: ($v[0].review // null | if . then {good, dead, noise, invalid} else null end)}}'
+    done | jq -s --arg pr "$PR" --arg started "$STARTED_AT" \
+              --arg finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              --argjson secs "$SECONDS" --argjson rc "$1" '
+        def sum_counts: reduce (.[] | select(.) | to_entries[]) as $e ({}; .[$e.key] += $e.value);
+        {pr: (if $pr == "" then null else ($pr | tonumber) end),
+         commit: (map(.commit) | map(select(.)) | first),
+         started_at: $started, finished_at: $finished, duration_seconds: $secs,
+         exit_code: $rc,
+         cost_usd: {generation: (map(.cost_usd.generation) | add),
+                    review:     (map(.cost_usd.review) | add),
+                    total:      (map(.cost_usd.generation + .cost_usd.review) | add)},
+         mutants: {generated:      (map(.mutants.generated) | add),
+                   apply_failed:   (map(.mutants.apply_failed) | add),
+                   compile_failed: (map(.mutants.compile_failed) | add),
+                   verify:         (map(.mutants.verify) | sum_counts),
+                   review:         (map(.mutants.review) | sum_counts)},
+         files: .}' > "$SUMMARY_FILE" \
+        && log "summary json: $SUMMARY_FILE" \
+        || warn "could not write $SUMMARY_FILE"
+}
 
 usage() {
     cat >&2 <<'EOF'
@@ -82,7 +141,7 @@ Options:
                        mutants are not verified
   --out <dir>          Output root (default: ./results); results land in
                        <dir>/<file-slug>-<timestamp>/, or with --pr in
-                       <dir>/pr-<n>-<timestamp>/<file-slug>/ next to a summary.md
+                       <dir>/pr-<n>-<timestamp>/<file-slug>/.
   --model <name>       Model for the mutator (default: opus)
   --review             Run the second-pass review of the mutants (default: off).
                        With verification it runs after it, on the survivors.
@@ -577,6 +636,9 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
     # One stamp for every file, so each run dir is known here.
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     run_root="$OUT_ROOT/pr-$PR-$stamp"
+    SUMMARY_FILE="$run_root/summary.json"
+    SUMMARY_DIRS=()
+    for f in "${files[@]}"; do SUMMARY_DIRS+=("$run_root/$(slug_of "$f")"); done
     # What the harness itself brings to a run: the image, the scripts in it, the
     # prompts and the profile. A change to any of them must not reuse old mutants.
     harness_key="v$IMAGE_VERSION-$(cat "$HERE"/docker/{Dockerfile,entrypoint.sh,verify-entrypoint.sh,tu-check} \
@@ -589,7 +651,8 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
         if [[ -n "$prev" && -n "$head" ]]; then
             log "=== $f: unchanged since ${prev#"$OUT_ROOT"/}; reusing its mutants ==="
             dir="$run_root/$(slug_of "$f")"
-            mkdir -p "$dir/work" && cp -r "$prev/out" "$dir/" && rm -rf "$dir/out/verify"
+            # The old review stream goes too: its cost is not this run's.
+            mkdir -p "$dir/work" && cp -r "$prev/out" "$dir/" && rm -rf "$dir/out/verify" "$dir/out/review.stream.jsonl"
             # Name the run that generated them, not one that reused them too.
             if [[ -f "$prev/reused-from" ]]; then cp "$prev/reused-from" "$dir/"
             else printf '%s\n' "${prev#"$OUT_ROOT"/}" > "$dir/reused-from"; fi
@@ -816,6 +879,8 @@ fi
 
 log "run dir: $RUN_DIR"
 trap report_time EXIT
+# A file of a --pr run, or a --review-only, is summed up by whoever started it.
+[[ -n "${MUTANT_HARNESS_RUN_DIR:-}" ]] || { SUMMARY_FILE="$RUN_DIR/summary.json"; SUMMARY_DIRS=("$RUN_DIR"); }
 if [[ -n "$REVIEW_ONLY_COMMIT" ]]; then
     log "reviewing the mutants of $TARGET_FILE (model=${REVIEW_MODEL:-$MODEL}) ..."
 else
