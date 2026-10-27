@@ -3,6 +3,7 @@
 
   mutant-export results/src-policy-policy-cpp-latest > import.json
   mutant-export results/src-pow-cpp-latest --repo ~/src/bitcoin -o import.json
+  mutant-export results/pr-35591-20261026T105228Z -o import.json   # every verified file of a PR run
 
 Reads out/mutants.json and out/verify/results.jsonl, keeps the mutants whose
 status is `live`, and writes { "tool", "defaults", "mutants" }. originalCode and
@@ -137,16 +138,8 @@ def description(m):
     return f"> This description is AI generated, mistakes can be made.\n\n{body}"
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Export a run's live mutants as catalogue import JSON.")
-    ap.add_argument("run", help="run directory, e.g. results/src-pow-cpp-latest")
-    ap.add_argument("--repo", help="clone to read the target file from (default: GitHub)")
-    ap.add_argument("-o", "--output", help="output file (default: stdout)")
-    args = ap.parse_args()
-
-    run = Path(args.run).resolve()
-    if (run / "mutants.json").is_file():  # given out/ itself
-        run = run.parent
+def export_run(run, repo):
+    """(defaults, rows) for the live mutants of one file's run directory."""
     out = run / "out"
     manifest_path = out / "mutants.json"
     results_path = out / "verify" / "results.jsonl"
@@ -170,7 +163,7 @@ def main():
     github = re.search(r"github\.com[/:](.+?)(?:\.git)?$", profile["REPO_URL"])
     if not github:
         die(f"REPO_URL {profile['REPO_URL']} is not on GitHub")
-    old = read_file_at(commit, target, args.repo, github.group(1)).splitlines()
+    old = read_file_at(commit, target, repo, github.group(1)).splitlines()
 
     rows = []
     for m in manifest["mutants"]:
@@ -198,19 +191,56 @@ def main():
             "tool": {"mutantId": f"{run.name}/{m['id']}"},
         })
 
+    defaults = {
+        "commit": commit,
+        "buildCommand": f"cmake -B build {profile['CMAKE_FLAGS']}"
+                        " && cmake --build build -j$(nproc)",
+        "testCommand": " && ".join(STAGE_COMMANDS[s] for s in profile["VERIFY_STAGES"].split()),
+        "environment": ", ".join(["Debian bookworm", "GCC (build-essential)", "cmake"]
+                                 + profile["APT_PACKAGES"].split()),
+        "observedResult": "SURVIVED",
+    }
+    return defaults, rows
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Export a run's live mutants as catalogue import JSON.")
+    ap.add_argument("run", help="run directory, e.g. results/src-pow-cpp-latest, "
+                                "or a PR run holding one per file")
+    ap.add_argument("--repo", help="clone to read the target file from (default: GitHub)")
+    ap.add_argument("-o", "--output", help="output file (default: stdout)")
+    args = ap.parse_args()
+
+    run = Path(args.run).resolve()
+    if (run / "mutants.json").is_file():  # given out/ itself
+        run = run.parent
+    if (run / "out" / "mutants.json").is_file():
+        runs = [run]
+    else:  # a PR run: one run directory per file
+        runs = []
+        for d in sorted(run.iterdir()):
+            if not (d / "out" / "mutants.json").is_file():
+                continue
+            if not (d / "out" / "verify" / "results.jsonl").is_file():
+                print(f"mutant-export: skipping {d.name}: not verified", file=sys.stderr)
+                continue
+            runs.append(d)
+        if not runs:
+            die(f"no verified runs in {run}")
+
+    defaults, rows = None, []
+    for r in runs:
+        d, rs = export_run(r, args.repo)
+        if defaults is not None and d != defaults:
+            die(f"{r.name} was run with different defaults (commit, target) than {runs[0].name}")
+        defaults = d
+        rows += rs
+
     harness_rev = subprocess.run(["git", "-C", str(HARNESS), "rev-parse", "--short", "HEAD"],
                                  capture_output=True, text=True).stdout.strip()
     doc = {
         "tool": {"name": "mutant-harness", "version": harness_rev or "unknown"},
-        "defaults": {
-            "commit": commit,
-            "buildCommand": f"cmake -B build {profile['CMAKE_FLAGS']}"
-                            " && cmake --build build -j$(nproc)",
-            "testCommand": " && ".join(STAGE_COMMANDS[s] for s in profile["VERIFY_STAGES"].split()),
-            "environment": ", ".join(["Debian bookworm", "GCC (build-essential)", "cmake"]
-                                     + profile["APT_PACKAGES"].split()),
-            "observedResult": "SURVIVED",
-        },
+        "defaults": defaults,
         "mutants": rows,
     }
     text = json.dumps(doc, indent=2) + "\n"
