@@ -41,6 +41,7 @@ DETACH=0
 APPLY_PATCH=""
 EXTRA_DOCKER_ARGS=()
 WORKERS=1
+NO_CACHE=0
 
 log()  { printf '\033[36m[mutant-harness]\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33m[mutant-harness]\033[0m %s\n' "$*" >&2; }
@@ -169,6 +170,8 @@ Options:
                        its own copy of the build volume (default: 1). Every
                        copy is another ~5 GB of disk and another test suite's
                        worth of RAM.
+  --no-cache           With --pr, generate every file anew instead of reusing
+                       the mutants of an earlier run of the same PR
   --export             After verification, write the live mutants to
                        out/import.json with bin/mutant-export
   --update-core        git fetch master inside the container first
@@ -226,6 +229,7 @@ while [[ $# -gt 0 ]]; do
         --apply)          APPLY_PATCH="${2:?}"; shift 2 ;;
         --docker-arg)     EXTRA_DOCKER_ARGS+=("${2:?}"); shift 2 ;;
         --workers)        WORKERS="${2:?}"; shift 2 ;;
+        --no-cache)       NO_CACHE=1; shift ;;
         -h|--help)        usage; exit 0 ;;
         *)                die "unknown option: $1 (try --help)" ;;
     esac
@@ -599,7 +603,8 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
     set -- "${ORIG_ARGS[@]}"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --rebuild)                    shift ;;
+            # A fresh run still writes its key, so later runs can reuse it.
+            --rebuild|--no-cache)         shift ;;
             --workers)                    shift 2 ;;
             # Each file's run dir is handed to it; where results go is no part of a cache key.
             --out)                        shift 2 ;;
@@ -647,7 +652,8 @@ if [[ -n "$PR" && -z "$TARGET_FILE" ]]; then
     for f in "${files[@]}"; do
         key="${blobs_of[$f]:-} $harness_key ${gen_args[*]}"
         keys+=("$key")
-        prev="$(cached_run "$f" "$key")"
+        prev=""
+        [[ "$NO_CACHE" == 1 ]] || prev="$(cached_run "$f" "$key")"
         if [[ -n "$prev" && -n "$head" ]]; then
             log "=== $f: unchanged since ${prev#"$OUT_ROOT"/}; reusing its mutants ==="
             dir="$run_root/$(slug_of "$f")"
