@@ -47,7 +47,9 @@ For each mutant, in order:
      consensus or policy change, a privacy leak, memory beyond a configured
      limit, or a regression on the default configuration all count.
      Performance under a non-default flag, cache sizing within the limits, and
-     log or help text do not. If no input diverges, it has no consequence.
+     log or help text do not. Neither does a divergence that only shows on a
+     test network (testnet3, testnet4, signet), unless the pull request is
+     about that network.
    - **Plausibility:** would a developer write this? A copy-paste from a nearby
      line, `break` for `continue`, a flipped comparison, or a dropped call are
      plausible. An edit that needs an odd constant or would make a reviewer stop
